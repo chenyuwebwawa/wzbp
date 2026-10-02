@@ -334,7 +334,8 @@ wzbp · 王者荣耀 BP 展示台 —— Linux 一键安装脚本 v1.0.0
   --env-file <路径>       指定一份现成的 .env（会复制到站点目录并沿用其中的密码）
   --no-nginx             只装 Node 服务与数据库，不动 Nginx
   --no-ssl               不申请 HTTPS（默认会尝试，失败不阻断）
-  --uninstall            卸载：停服务 + 删 Nginx 配置（不会删数据库）
+  --uninstall            卸载：停服务 + 删 Nginx 配置（不会删数据库与站点文件）
+                         域名可省略，会自动按站点目录匹配要删的配置
   --yes, -y              非交互确认（CI / 无人值守）
   --dry-run              只打印将要执行的操作，不真的改系统
   --verbose              打印被调用命令的完整输出（排错用）
@@ -442,7 +443,10 @@ normalize_and_validate() {
   fi
 
   if [ -z "$DOMAIN" ]; then
-    usage_err '缺少必填参数 --domain（站点域名，例如 --domain bp.example.com）'
+    # 卸载时域名是可选的：没有它也能按站点目录兜底清理（见 main 里的 UNINSTALL 分支）
+    if [ "$UNINSTALL" != 1 ]; then
+      usage_err '缺少必填参数 --domain（站点域名，例如 --domain bp.example.com）'
+    fi
   fi
 
   # 域名规范化：去掉协议头、路径、端口后段、末尾点
@@ -456,7 +460,7 @@ normalize_and_validate() {
     *.) DOMAIN="${DOMAIN%.}" ;;
   esac
   case "$DOMAIN" in
-    '') usage_err '--domain 不能为空' ;;
+    '') [ "$UNINSTALL" = 1 ] || usage_err '--domain 不能为空' ;;
   esac
   case "$DOMAIN" in
     *[!A-Za-z0-9._:-]*) usage_err "--domain 含非法字符：$DOMAIN（只允许字母、数字、. - _ :）" ;;
@@ -1997,16 +2001,37 @@ step_uninstall_nginx() {
 
   local st="${DIR}/${STATE_NAME}" conf=''
   conf=$(state_get "$st" WZBP_STATE_NGINX_CONF 2>/dev/null || true)
-  [ -n "$conf" ] || conf=$(nginx_conf_path_for_domain "$DOMAIN")
-  NGINX_CONF_PATH="$conf"
+  if [ -z "$conf" ] && [ -n "$DOMAIN" ]; then
+    conf=$(nginx_conf_path_for_domain "$DOMAIN")
+  fi
 
   if [ "$NO_NGINX" = 1 ]; then
     warn '--no-nginx：不动 Nginx 配置'
     return 0
   fi
 
-  if [ ! -f "$conf" ]; then
-    warn "没找到配置文件（可能从没装过，或已删除）：${conf}"
+  # 没有域名、也没记录：按「配置文件里引用了本站点目录」来兜底识别，
+  # 比按文件名猜安全得多（只删确实指向 ${DIR} 的那些）。
+  local vdir="${NGINX_CONF_DIR:-/www/server/panel/vhost/nginx}"
+  if [ -z "$conf" ] && [ -d "$vdir" ]; then
+    local f hit=''
+    for f in "$vdir"/*.conf; do
+      [ -f "$f" ] || continue
+      if grep -qsF "$DIR" "$f" 2>/dev/null; then
+        hit="$f"
+        break
+      fi
+    done
+    if [ -n "$hit" ]; then
+      conf="$hit"
+      info "按站点目录匹配到 Nginx 配置：${conf}"
+    fi
+  fi
+
+  NGINX_CONF_PATH="${conf:-${vdir}/<你的域名>.conf}"
+
+  if [ -z "$conf" ] || [ ! -f "$conf" ]; then
+    warn "没找到配置文件（可能从没装过，或已删除）：${NGINX_CONF_PATH}"
     return 0
   fi
 
@@ -2075,6 +2100,13 @@ main() {
   say '============================================================'
 
   if [ "$UNINSTALL" = 1 ]; then
+    # 没有 --domain、也没有安装记录时，不要让用户卡在「缺少必填参数」上 ——
+    # 那种情况多半是装了一半没留记录，按站点目录兜底清理即可。
+    if [ -z "$DOMAIN" ]; then
+      warn '没有 --domain，也没有安装记录：按站点目录兜底卸载'
+      info "将清除：引用 ${DIR} 的 Nginx 配置、名为 ${SERVICE_NAME} 的常驻服务、以及 server/index.js 进程"
+      info '建议下次卸载带上 --domain，能更精确地定位要删的东西'
+    fi
     STEP_TOTAL=4
     step_env_check_uninstall
     step_uninstall_stop
