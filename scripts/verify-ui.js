@@ -263,12 +263,64 @@ window.__SMOKE__ = (function () {
       kplBtn.click();
       await wait(250);
       eq(D.state().mode, 'kpl', '已切到全局 BP');
-      eq(D.state().totalSteps, 20, '全局 BP 共 20 手');
+      eq(D.state().totalSteps, 18, '全局 BP 共 18 手');
       var visBlue = Array.prototype.filter.call(document.querySelectorAll('#banLaneBlue .ban-slot'),
         function (n) { return n.style.display !== 'none'; }).length;
-      eq(visBlue, 5, '全局 BP 显示 5 个蓝方 ban 位');
+      eq(visBlue, 4, '全局 BP 显示 4 个蓝方 ban 位');
       ok(/全局\s*BP/.test(document.querySelector('#boardMode').textContent),
         '展示板标题切到全局 BP', document.querySelector('#boardMode').textContent);
+      /* 用户明确要求：赛制标题就叫「全局 BP」，不要带 B2P3 之类的细节 */
+      eq(document.querySelector('#boardMode').textContent.trim(), '全局 BP', '标题就是「全局 BP」');
+    }
+
+    /* ---------- 10b. 战队名：控制台能改、展示板能显示、展示窗能同步 ---------- */
+    {
+      eq(!!WZ.board.setTeamNames, true, 'board 暴露了 setTeamNames');
+      var bar = document.getElementById('teamNameBar');
+      ok(!!bar, '控制台里有战队名输入条');
+      var tb = document.getElementById('tnbInput-blue');
+      var tr = document.getElementById('tnbInput-red');
+      ok(!!tb && !!tr, '蓝红两个战队名输入框都在');
+
+      if (tb && tr && WZ.app && WZ.app.setTeamName) {
+        tb.value = '成都AG超玩会';
+        tb.dispatchEvent(new Event('input', { bubbles: true }));
+        tr.value = '上海EDG.M';
+        tr.dispatchEvent(new Event('input', { bubbles: true }));
+        await wait(260);
+
+        var heads = {
+          blue: document.querySelector('#pickLaneBlue .team-head-name'),
+          red: document.querySelector('#pickLaneRed .team-head-name')
+        };
+        ok(!!heads.blue && !!heads.red, '展示板上两栏都有战队名节点');
+        eq(heads.blue.textContent, '成都AG超玩会', '蓝方战队名显示在展示板上');
+        eq(heads.red.textContent, '上海EDG.M', '红方战队名显示在展示板上');
+        ok(document.querySelector('#pickLaneBlue .team-head').classList.contains('is-custom'),
+          '有真实队名时加了 is-custom 样式（与占位区分）');
+        /* 同步载荷要带上战队名，展示窗才能显示 */
+        ok(WZ.app.snapshotForTest && WZ.app.snapshotForTest().teamNames &&
+           WZ.app.snapshotForTest().teamNames.blue === '成都AG超玩会',
+          '同步载荷里带上了战队名');
+
+        /* 清空后要回退成「蓝方/红方」，不留空白 */
+        tb.value = '';
+        tb.dispatchEvent(new Event('input', { bubbles: true }));
+        await wait(200);
+        eq(document.querySelector('#pickLaneBlue .team-head-name').textContent, '蓝方',
+          '清空队名后回退显示「蓝方」');
+      }
+      /* 超长队名不能把横条撑破 */
+      if (WZ.board.setTeamNames) {
+        WZ.board.setTeamNames({ blue: '一个非常非常非常长的战队名字测试', red: '' });
+        await wait(120);
+        var longHead = document.querySelector('#pickLaneBlue .team-head-name');
+        eq(longHead.textContent, '一个非常非常非常长的战队名字测试', '超长队名仍完整显示');
+        ok(parseInt(longHead.style.fontSize, 10) > 0 &&
+           parseInt(longHead.style.fontSize, 10) <= 30, '超长队名会缩小字号',
+          'fontSize=' + longHead.style.fontSize);
+        WZ.board.setTeamNames({ blue: '', red: '' });
+      }
     }
     /* ---------- 11. 导出 / 导入 round-trip ---------- */
     D.init('ranked');
@@ -310,7 +362,7 @@ window.__SMOKE__ = (function () {
       var guard2 = 0;
       while (!D.state().done && guard2++ < 40) {
         var st3 = D.state();
-        if (st3.stepInfo.action === 'pick' && st3.bans.blue.length >= 5 && st3.bans.red.length >= 5) break;
+        if (st3.stepInfo.action === 'pick' && st3.bans.blue.length >= 4 && st3.bans.red.length >= 4) break;
         var r3 = D.apply(st3.stepInfo.side === 'both' ? 'blue' : st3.stepInfo.side,
           st3.stepInfo.action, st3.pool[0]);
         if (!r3.ok) break;
@@ -320,9 +372,9 @@ window.__SMOKE__ = (function () {
       var redBanFilled = document.querySelectorAll('#banLaneRed .ban-slot.filled').length;
       var visBlueBans = Array.prototype.filter.call(document.querySelectorAll('#banLaneBlue .ban-slot'),
         function (n) { return n.style.display !== 'none'; }).length;
-      ok(visBlueBans >= 5, '全局 BP 下展示板为单侧预留了 ≥5 个 ban 位', '可见 ' + visBlueBans + ' 个');
-      ok(blueBanFilled + redBanFilled >= 8,
-        '第二轮（B3P2）的 ban 也能落在展示板上（累计填充 ' + (blueBanFilled + redBanFilled) + ' 个）');
+      ok(visBlueBans >= 4, '全局 BP 下展示板为单侧预留了 ≥4 个 ban 位', '可见 ' + visBlueBans + ' 个');
+      eq(blueBanFilled + redBanFilled, 8,
+        '两轮共 8 个 ban 全部落在展示板上（累计填充 ' + (blueBanFilled + redBanFilled) + ' 个）');
       eq(blueBanFilled, Math.min(D.state().cap.blue.ban, D.state().bans.blue.length),
         '蓝方填满的 ban 位数量与实际 ban 数一致');
     }

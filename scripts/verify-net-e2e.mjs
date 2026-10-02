@@ -352,8 +352,8 @@ try {
   check('落子后计时重置为接近满格', Number(act.remainingMs) > Number(act.seconds) * 1000 - 3000,
     JSON.stringify(act));
 
-  /* ---------- ⑤ 落满第一轮（B2P3 = 10 手） ---------- */
-  console.log('\n[5] 落满第一轮（B2P3，10 手）');
+  /* ---------- ⑤ 落满第一轮（4 ban + 6 pick = 10 手） ---------- */
+  console.log('\n[5] 落满第一轮（蓝B1 红B1 蓝B1 红B1 → 蓝P1 红P2 蓝P2 红P1，10 手）');
   for (let i = 0; i < 9; i++) {
     const r = await evalIn(A, `(function(){
       return window.WZ.net.getState(window.__roomCode).then(function(s){
@@ -399,7 +399,7 @@ try {
     });
   })()`));
   console.log('  ' + JSON.stringify(round1));
-  check('服务端记录 10 手', round1.serverActions === 10, String(round1.serverActions));
+  check('服务端记录 10 手（第一轮）', round1.serverActions === 10, String(round1.serverActions));
   check('【回归】本机盘面完整重放 10 手（全局 BP 不阻断）', round1.localProgress === 10, String(round1.localProgress));
   check('第一轮 ban/pick 数正确（各 2 ban / 各 3 pick）',
     round1.bans.blue === 2 && round1.bans.red === 2 && round1.picks.blue === 3 && round1.picks.red === 3,

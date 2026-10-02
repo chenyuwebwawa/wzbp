@@ -17,6 +17,8 @@ window.WZ = window.WZ || {};
   var dom = {};
   var banSlots = { blue: [], red: [] };
   var pickSlots = { blue: [], red: [] };
+  var teamHeads = { blue: null, red: null };
+  var teamNames = { blue: '', red: '' };
   var lastPlaced = null;     // 用于「刚落位」闪动动画
   var currentStage = null;   // { heroId, slotLabel, side, skinIndex }
   var fitted = false;
@@ -65,6 +67,39 @@ window.WZ = window.WZ || {};
     return board;
   };
 
+  /* ------------------------------------------------------------
+     战队名
+     ------------------------------------------------------------
+     直播时观众要知道「蓝方是哪支队」，所以队伍栏顶部有一条名字横条。
+     空名字时回退成「蓝方 / 红方」，不留一片空白。 */
+  board.setTeamNames = function (names) {
+    names = names || {};
+    var b = String(names.blue || '').trim();
+    var r = String(names.red || '').trim();
+    if (teamNames.blue === b && teamNames.red === r) return board;
+    teamNames.blue = b;
+    teamNames.red = r;
+    applyTeamNames();
+    return board;
+  };
+  board.teamNames = function () {
+    return { blue: teamNames.blue, red: teamNames.red };
+  };
+
+  function applyTeamNames() {
+    [['blue', '蓝方'], ['red', '红方']].forEach(function (pair) {
+      var side = pair[0], fallback = pair[1];
+      var h = teamHeads[side];
+      if (!h) return;
+      var nm = teamNames[side] || fallback;
+      h.name.textContent = nm;
+      /* 名字太长时缩小字号，避免把横条撑破 */
+      h.name.style.fontSize = nm.length > 12 ? '20px' : (nm.length > 8 ? '25px' : '30px');
+      h.head.classList.toggle('is-custom', !!teamNames[side]);
+      h.name.title = teamNames[side] || '';
+    });
+  }
+
   function buildBanLane(lane, side) {
     lane.innerHTML = '';
     /* 单侧 ban 位上限：KPL 是 5 个（首轮 3 + 次轮 2），征召是 3 个。
@@ -85,6 +120,16 @@ window.WZ = window.WZ || {};
 
   function buildPickLane(lane, side) {
     lane.innerHTML = '';
+
+    /* 战队名横条：放在队伍栏顶部，直播画面上能直接看到「哪支队在蓝/红方」 */
+    var head = util.el('div', 'team-head team-head-' + side);
+    var tname = util.el('div', 'team-head-name', side === 'blue' ? '蓝方' : '红方');
+    var tside = util.el('div', 'team-head-side', side === 'blue' ? 'BLUE' : 'RED');
+    head.appendChild(tname);
+    head.appendChild(tside);
+    lane.appendChild(head);
+    teamHeads[side] = { head: head, name: tname };
+
     for (var i = 0; i < 5; i++) {
       var slot = util.el('div', 'pick-slot empty-' + side);
       var art = util.el('div', 'ps-art');

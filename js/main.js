@@ -80,8 +80,13 @@ window.WZ = window.WZ || {};
     WZ.storyPanel.init();
     WZ.story.on(function (d) {
       WZ.overlay.render(d);
+      pushTeamNames();               // 赛前面板里改了队名 → 展示板立刻跟着变
       broadcastOverlayToCollectors();
     });
+
+    /* 战队名输入框（展示板上方，直播时随手改） */
+    buildTeamNameBar();
+    pushTeamNames();
 
     /* 联网：探测服务端；不可用则静默保持纯静态模式 */
     initOnline();
@@ -261,6 +266,35 @@ window.WZ = window.WZ || {};
   /* ------------------------------------------------------------
      赛制切换
      ------------------------------------------------------------ */
+  /* ------------------------------------------------------------
+     战队名输入条
+     ------------------------------------------------------------
+     写在控制台顶部，改完立刻出现在展示板上（并同步到展示窗）。
+     存进赛前面板的 pre.blue.name / pre.red.name，与「赛前面板」共用一份数据。 */
+  function buildTeamNameBar() {
+    var host = document.getElementById('teamNameBar');
+    if (!host) return;
+    host.innerHTML = '';
+
+    var names = currentTeamNames();
+    [['blue', '蓝方战队名', names.blue], ['red', '红方战队名', names.red]].forEach(function (it) {
+      var side = it[0];
+      var wrap = util.el('label', 'tnb-item tnb-' + side);
+      wrap.appendChild(util.el('span', 'tnb-tag', side === 'blue' ? '蓝' : '红'));
+      var input = util.el('input', 'tnb-input');
+      input.type = 'text';
+      input.maxLength = 24;
+      input.value = it[2];
+      input.placeholder = it[1];
+      input.id = 'tnbInput-' + side;
+      input.addEventListener('input', function () { setTeamName(side, input.value); });
+      wrap.appendChild(input);
+      host.appendChild(wrap);
+    });
+    host.hidden = false;
+  }
+  app.buildTeamNameBar = buildTeamNameBar;
+
   function buildModeSwitch() {
     dom.modeSwitch.innerHTML = '';
     draft.MODES.forEach(function (m) {
@@ -472,6 +506,8 @@ window.WZ = window.WZ || {};
       })(),
       heroCount: heroes.length,
       timer: { total: timer.total, left: timer.left, running: timer.running },
+      /* 战队名：展示窗也要显示（直播画面上「蓝方是哪支队」） */
+      teamNames: currentTeamNames(),
       /* 赛事面板数据：采集窗上线时一并补齐 */
       story: (WZ.story && typeof WZ.story.get === 'function') ? WZ.story.get() : null,
       present: manualFocus ? {
@@ -482,6 +518,41 @@ window.WZ = window.WZ || {};
       } : null
     };
   }
+
+  /* 战队名统一从「赛前面板」的蓝/红队名取，避免两处各填一份对不上 */
+  function currentTeamNames() {
+    try {
+      var d = WZ.story && WZ.story.get ? WZ.story.get() : null;
+      var pre = (d && d.pre) || {};
+      return {
+        blue: (pre.blue && pre.blue.name) || '',
+        red: (pre.red && pre.red.name) || ''
+      };
+    } catch (e) {
+      return { blue: '', red: '' };
+    }
+  }
+
+  /* 把战队名刷到展示板上（控制窗与展示窗都会调） */
+  function pushTeamNames(names) {
+    if (!WZ.board || typeof WZ.board.setTeamNames !== 'function') return;
+    WZ.board.setTeamNames(names || currentTeamNames());
+  }
+
+  /* 快速改战队名：直接写进赛前面板的数据（唯一数据源），两处界面同步更新 */
+  function setTeamName(side, name) {
+    if (!WZ.story || typeof WZ.story.patch !== 'function') return;
+    var clean = String(name || '').trim().slice(0, 24);
+    var patch = { pre: {} };
+    patch.pre[side] = { name: clean };
+    WZ.story.patch(patch);
+    pushTeamNames();
+    broadcastOverlayToCollectors();
+    broadcastSnapshot('update');
+  }
+  app.setTeamName = setTeamName;
+  /* 同步载荷快照：自检脚本用它验证「展示窗能拿到什么」 */
+  app.snapshotForTest = snapshotPayload;
 
   function broadcastSnapshot(type) {
     if (isDisplay || suppressBroadcast || !sync) return;
@@ -519,6 +590,15 @@ window.WZ = window.WZ || {};
           };
           WZ.board.showHero(h, manualFocus.slotLabel, manualFocus.side, manualFocus.skinIndex);
         }
+      }
+      /* 战队名：载荷里带了就用载荷的（展示窗本地没有 story 编辑权） */
+      if (payload.teamNames) {
+        pushTeamNames(payload.teamNames);
+      } else if (payload.story && payload.story.pre) {
+        pushTeamNames({
+          blue: (payload.story.pre.blue && payload.story.pre.blue.name) || '',
+          red: (payload.story.pre.red && payload.story.pre.red.name) || ''
+        });
       }
       setDisplaySync('已同步 · ' + (draft.state() ? draft.state().progress : 0) + ' 步');
       WZ.board.fit();
@@ -580,6 +660,8 @@ window.WZ = window.WZ || {};
       updateUrl(state);
     }
     WZ.board.render(state);
+    /* 战队名不属于 BP 状态，但每次重绘都刷一遍，保证窗口缩放/重载后不丢 */
+    pushTeamNames();
     WZ.ui.syncTakenFlags();
     WZ.ui.syncActions();
     /* 赛前面板跟随 BP：撤销/重开时清掉失效英雄，有空位就自动补上。

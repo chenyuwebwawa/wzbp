@@ -211,11 +211,13 @@ const EXPECTED = {
     'red:pick', 'blue:pick', 'blue:pick', 'red:pick'
   ],
   kpl: [
-    /* 第一轮 B2P3（10 手）：4 ban（蓝2红2）→ 6 pick（红3蓝3，红先手） */
-    'blue:ban', 'red:ban', 'red:ban', 'blue:ban',
-    'red:pick', 'blue:pick', 'blue:pick', 'red:pick', 'red:pick', 'blue:pick',
-    /* 第二轮 B3P2（10 手）：6 ban（红3蓝3）→ 4 pick（红2蓝2，红先手） */
-    'red:ban', 'blue:ban', 'blue:ban', 'red:ban', 'red:ban', 'blue:ban',
+    /* 第一轮禁用：蓝B1 红B1 蓝B1 红B1 */
+    'blue:ban', 'red:ban', 'blue:ban', 'red:ban',
+    /* 第一轮选择：蓝P1 红P2 蓝P2 红P1 */
+    'blue:pick', 'red:pick', 'red:pick', 'blue:pick', 'blue:pick', 'red:pick',
+    /* 第二轮禁用：红B1 蓝B1 红B1 蓝B1 */
+    'red:ban', 'blue:ban', 'red:ban', 'blue:ban',
+    /* 第二轮选择：红P1 蓝P2 红P1 */
     'red:pick', 'blue:pick', 'blue:pick', 'red:pick'
   ],
   peak: [
@@ -374,23 +376,31 @@ async function runSuite() {
       !!ord && ord.map((s) => s.s + ':' + s.a).join(',') === EXPECTED[mode].join(','),
       ord && ord.map((s) => s.s + ':' + s.a).join(','));
     if (mode === 'kpl') {
-      /* 阶段边界（对应客户端引擎的 9 条断言）：B2P3 → B3P2 */
-      const r1 = ord.slice(0, 10);
-      const r2 = ord.slice(10);
+      /* 阶段边界（对应客户端引擎的断言）：蓝B1 红B1 蓝B1 红B1 → 蓝P1 红P2 蓝P2 红P1
+         → 红B1 蓝B1 红B1 蓝B1 → 红P1 蓝P2 红P1 */
+      const r1ban = ord.slice(0, 4);
+      const r1pick = ord.slice(4, 10);
+      const r2ban = ord.slice(10, 14);
+      const r2pick = ord.slice(14);
       const cnt = (arr, side, act) => arr.filter((s) => s.s === side && s.a === act).length;
-      checkEq('kpl 第一轮 4 ban + 6 pick',
-        r1.filter((s) => s.a === 'ban').length + '+' + r1.filter((s) => s.a === 'pick').length, '4+6');
-      checkEq('kpl 第二轮 6 ban + 4 pick',
-        r2.filter((s) => s.a === 'ban').length + '+' + r2.filter((s) => s.a === 'pick').length, '6+4');
-      checkEq('kpl 第一轮 pick 先手方 = 红',
-        r1.filter((s) => s.a === 'pick')[0].s, 'red');
-      checkEq('kpl 第二轮 pick 先手方 = 红',
-        r2.filter((s) => s.a === 'pick')[0].s, 'red');
-      checkEq('kpl 合计 10 ban + 10 pick',
-        ord.filter((s) => s.a === 'ban').length + '+' + ord.filter((s) => s.a === 'pick').length, '10+10');
-      checkEq('kpl 每队 5 ban + 5 pick',
+      checkEq('kpl 第一轮禁用 4 ban', r1ban.length, 4);
+      checkEq('kpl 第一轮禁用对半（蓝2红2）',
+        cnt(r1ban, 'blue', 'ban') + ',' + cnt(r1ban, 'red', 'ban'), '2,2');
+      checkEq('kpl 第一轮禁用先手方 = 蓝', r1ban[0].s, 'blue');
+      checkEq('kpl 第一轮选择 6 pick 且先手方 = 蓝', r1pick.length + '@' + r1pick[0].s, '6@blue');
+      checkEq('kpl 第一轮选择是 蓝P1 红P2 蓝P2 红P1',
+        r1pick.map((s) => (s.s === 'blue' ? 'B' : 'R')).join(''), 'BRRBBR');
+      checkEq('kpl 第二轮禁用 4 ban 且先手方 = 红', r2ban.length + '@' + r2ban[0].s, '4@red');
+      checkEq('kpl 第二轮禁用是 红B1 蓝B1 红B1 蓝B1',
+        r2ban.map((s) => (s.s === 'blue' ? 'B' : 'R')).join(''), 'RBRB');
+      checkEq('kpl 第二轮选择 4 pick 且先手方 = 红', r2pick.length + '@' + r2pick[0].s, '4@red');
+      checkEq('kpl 第二轮选择是 红P1 蓝P2 红P1',
+        r2pick.map((s) => (s.s === 'blue' ? 'B' : 'R')).join(''), 'RBBR');
+      checkEq('kpl 合计 8 ban + 10 pick',
+        ord.filter((s) => s.a === 'ban').length + '+' + ord.filter((s) => s.a === 'pick').length, '8+10');
+      checkEq('kpl 每队 4 ban + 5 pick（双方对称）',
         [cnt(ord, 'blue', 'ban'), cnt(ord, 'red', 'ban'), cnt(ord, 'blue', 'pick'), cnt(ord, 'red', 'pick')].join(','),
-        '5,5,5,5');
+        '4,4,5,5');
     }
     if (mode === 'peak') {
       check('peak 首项为 {s:"both",a:"ban",n:3}', !!ord && ord[0].s === 'both' && ord[0].a === 'ban' && ord[0].n === 3,
@@ -895,7 +905,7 @@ async function runSuite() {
     gp2.json.game.globalUsed.blue.includes(bluePick1) && gp2.json.game.globalUsed.red.includes(redPick1),
     JSON.stringify(gp2.json.game.globalUsed));
 
-  /* 第二局：先落 4 手 ban，走到第 5 手（红方 pick） */
+  /* 第二局：先落满第一轮禁用（4 手），此时轮到第 5 手 = 蓝P1 */
   for (let i = 0; i < 4; i++) {
     const st = await api('GET', '/api/rooms/' + gpCode + '/state');
     const na = st.json.game.nextAction;
@@ -904,24 +914,28 @@ async function runSuite() {
     if (!r.json || !r.json.ok) break;
     gpUsed.push(hero);
   }
+
+  /* 第 5 手 = 蓝P1：验证「上一局被 ban 过的英雄，本局仍能选」（禁用不进全局池） */
+  const gpBanPick = await api('POST', '/api/rooms/' + gpCode + '/action', { side: 'blue', action: 'pick', heroId: blueBan1 }, P1);
+  checkEq('上一局被 ban 过的英雄 → 本局仍可选（禁用不进池）', gpBanPick.json && gpBanPick.json.ok, true);
+  if (gpBanPick.json && gpBanPick.json.ok) gpUsed.push(blueBan1);
+
+  /* 第 6 手 = 红P1：验证「同侧选自己上一局选过的」被服务端拒掉 */
   const gpHit = await api('POST', '/api/rooms/' + gpCode + '/action', { side: 'red', action: 'pick', heroId: redPick1 }, P2);
   checkEq('同侧选自己上一局选过的英雄 → 409', gpHit.status, 409);
   checkEq('同侧重复 → ERR_HERO_GLOBAL_USED', gpHit.json && gpHit.json.code, 'ERR_HERO_GLOBAL_USED');
   check('错误提示是中文且点明全局 BP', !!(gpHit.json && /全局 BP/.test(gpHit.json.error)), gpHit.json && gpHit.json.error);
 
+  /* 还是第 6 手（上一次被拒没消耗轮次）：验证「对方上一局选过的」允许（单边限制） */
   const gpCross = await api('POST', '/api/rooms/' + gpCode + '/action', { side: 'red', action: 'pick', heroId: bluePick1 }, P2);
   checkEq('对方上一局选过的英雄 → 允许（单边限制）', gpCross.json && gpCross.json.ok, true);
   if (gpCross.json && gpCross.json.ok) gpUsed.push(bluePick1);
 
-  const gpBanPick = await api('POST', '/api/rooms/' + gpCode + '/action', { side: 'blue', action: 'pick', heroId: blueBan1 }, P1);
-  checkEq('上一局被 ban 过的英雄 → 本局仍可选（禁用不进池）', gpBanPick.json && gpBanPick.json.ok, true);
-  if (gpBanPick.json && gpBanPick.json.ok) gpUsed.push(blueBan1);
-
-  /* 第二局继续落满剩余 14 手：验证「整局 20 手」与全局池共存 */
+  /* 第二局继续落满剩余 12 手：验证「整局 18 手」与全局池共存 */
   let gpRest = 0;
   let gpRestOk = true;
   let gpRestDetail = '';
-  for (let i = 6; i < 20; i++) {
+  for (let i = 6; i < 18; i++) {
     const st = await api('GET', '/api/rooms/' + gpCode + '/state');
     const na = st.json.game.nextAction;
     const expect = EXPECTED.kpl[i].split(':');
@@ -937,13 +951,13 @@ async function runSuite() {
     gpUsed.push(hero);
     gpRest += 1;
   }
-  check('kpl 第二局剩余 14 手全部按蓝图落成', gpRestOk && gpRest === 14, gpRestDetail || ('落了 ' + gpRest + ' 手'));
+  check('kpl 第二局剩余 12 手全部按蓝图落成', gpRestOk && gpRest === 12, gpRestDetail || ('落了 ' + gpRest + ' 手'));
   const gpEnd = await api('GET', '/api/rooms/' + gpCode + '/state');
-  checkEq('kpl 单局 actions=20（整局 20 手对得上）', gpEnd.json.actions.length, 20);
-  checkEq('kpl done=true 且 stepIndex=20', gpEnd.json.game.done + '/' + gpEnd.json.game.stepIndex, 'true/20');
-  checkEq('kpl 双方各 5 ban / 5 pick',
+  checkEq('kpl 单局 actions=18（整局 18 手对得上）', gpEnd.json.actions.length, 18);
+  checkEq('kpl done=true 且 stepIndex=18', gpEnd.json.game.done + '/' + gpEnd.json.game.stepIndex, 'true/18');
+  checkEq('kpl 双方各 4 ban / 5 pick',
     [gpEnd.json.game.bans.blue.length, gpEnd.json.game.bans.red.length,
-      gpEnd.json.game.picks.blue.length, gpEnd.json.game.picks.red.length].join(','), '5,5,5,5');
+      gpEnd.json.game.picks.blue.length, gpEnd.json.game.picks.red.length].join(','), '4,4,5,5');
   check('整局跑完后 globalUsed 仍跨局累计（双方各 ≥5）',
     gpEnd.json.game.globalUsed.blue.length >= 5 && gpEnd.json.game.globalUsed.red.length >= 5,
     'blue=' + gpEnd.json.game.globalUsed.blue.length + ' red=' + gpEnd.json.game.globalUsed.red.length);

@@ -212,39 +212,69 @@ section('撤销 / 重做');
   eq(D.undo().ok, false, '到底后不能再撤销');
 }
 
-section('全局 BP（B2P3 → B3P2，20 手）');
+section('全局 BP（蓝B1 红B1 蓝B1 红B1 → 蓝P1 红P2 蓝P2 红P1 → 红B1 蓝B1 红B1 蓝B1 → 红P1 蓝P2 红P1，18 手）');
 {
   const plan = autoPlay('kpl');
-  eq(plan.length, 20, '共执行 20 手');
+  eq(plan.length, 18, '共执行 18 手');
   const blueprint = plan.map((p) => (p.side === 'blue' ? 'B' : 'R') + p.action[0].toUpperCase()).join(',');
   eq(blueprint, [
-    /* 第一轮 B2P3：双方各 2 ban → 各 3 pick（共 10 手） */
-    'BB', 'RB', 'RB', 'BB',
-    'RP', 'BP', 'BP', 'RP', 'RP', 'BP',
-    /* 第二轮 B3P2：双方各 3 ban → 各 2 pick（共 10 手） */
-    'RB', 'BB', 'BB', 'RB', 'RB', 'BB',
+    /* 第一轮禁用：蓝B1 红B1 蓝B1 红B1 */
+    'BB', 'RB', 'BB', 'RB',
+    /* 第一轮选择：蓝P1 红P2 蓝P2 红P1 */
+    'BP', 'RP', 'RP', 'BP', 'BP', 'RP',
+    /* 第二轮禁用：红B1 蓝B1 红B1 蓝B1 */
+    'RB', 'BB', 'RB', 'BB',
+    /* 第二轮选择：红P1 蓝P2 红P1 */
     'RP', 'BP', 'BP', 'RP'
-  ].join(','), '顺序符合「先 B2P3 再 B3P2」');
+  ].join(','), '顺序与用户给的记法逐项一致');
 
-  /* 阶段边界：第一轮 10 手（4 ban + 6 pick），第二轮 10 手（6 ban + 4 pick） */
-  const first10 = plan.slice(0, 10);
-  eq(first10.filter((p) => p.action === 'ban').length, 4, '第一轮 4 个 ban');
-  eq(first10.filter((p) => p.action === 'pick').length, 6, '第一轮 6 个 pick（双方各 3）');
-  eq(first10.filter((p) => p.action === 'pick' && p.side === 'blue').length, 3, '第一轮蓝方 3 pick');
-  eq(first10.filter((p) => p.action === 'pick' && p.side === 'red').length, 3, '第一轮红方 3 pick');
-  const last10 = plan.slice(10);
-  eq(last10.filter((p) => p.action === 'ban').length, 6, '第二轮 6 个 ban（双方各 3）');
-  eq(last10.filter((p) => p.action === 'pick').length, 4, '第二轮 4 个 pick（双方各 2）');
+  /* 阶段边界 */
+  const bans1 = plan.slice(0, 4);
+  eq(bans1.filter((p) => p.action === 'ban').length, 4, '第一轮 4 个 ban');
+  eq(bans1.filter((p) => p.side === 'blue').length, 2, '第一轮蓝方 2 ban');
+  eq(bans1.filter((p) => p.side === 'red').length, 2, '第一轮红方 2 ban');
+  const picks1 = plan.slice(4, 10);
+  eq(picks1.map((p) => (p.side === 'blue' ? 'B' : 'R')).join(''), 'BRRBBR',
+    '第一轮 pick 是 蓝P1 红P2 蓝P2 红P1（BRRBBR）');
+  const bans2 = plan.slice(10, 14);
+  eq(bans2.filter((p) => p.action === 'ban').length, 4, '第二轮 4 个 ban');
+  eq(bans2.map((p) => (p.side === 'blue' ? 'B' : 'R')).join(''), 'RBRB',
+    '第二轮 ban 是 红B1 蓝B1 红B1 蓝B1（RBRB）');
+  const picks2 = plan.slice(14);
+  eq(picks2.map((p) => (p.side === 'blue' ? 'B' : 'R')).join(''), 'RBBR',
+    '第二轮 pick 是 红P1 蓝P2 红P1（RBBR）');
 
   const s = D.state();
-  eq(s.cap.blue.ban, 5, '蓝方 5 个 ban 位');
-  eq(s.cap.red.ban, 5, '红方 5 个 ban 位');
+  eq(s.cap.blue.ban, 4, '蓝方 4 个 ban 位');
+  eq(s.cap.red.ban, 4, '红方 4 个 ban 位');
   eq(s.cap.blue.pick, 5, '蓝方 5 个 pick 位');
   eq(s.cap.red.pick, 5, '红方 5 个 pick 位');
-  eq(s.bans.blue.length + s.bans.red.length, 10, '共 10 ban');
+  eq(s.bans.blue.length + s.bans.red.length, 8, '共 8 ban');
   eq(s.picks.blue.length + s.picks.red.length, 10, '共 10 pick');
+  /* 双方必须完全对称：各 4 ban + 5 pick */
+  eq(s.bans.blue.length, 4, '蓝方 ban 数 = 4');
+  eq(s.bans.red.length, 4, '红方 ban 数 = 4');
+  eq(s.picks.blue.length, 5, '蓝方 pick 数 = 5');
+  eq(s.picks.red.length, 5, '红方 pick 数 = 5');
   eq(s.done, true, '能正常走完');
   eq(s.global, true, '标记为全局 BP 赛制');
+}
+
+section('赛制顺序与服务端镜像逐项一致（防止两边漂移）');
+{
+  /* 服务端在 server/draft.js 里镜像了一份顺序，两边不一致会导致整局都对不上。
+     这里直接把两份读出来对比，而不是只靠人眼。 */
+  const fs = await import('node:fs');
+  const srv = fs.readFileSync('server/draft.js', 'utf8');
+  const m = srv.match(/const KPL_STEPS = \[([\s\S]*?)\n\];/);
+  ok(!!m, '能从 server/draft.js 里读到 KPL_STEPS');
+  if (m) {
+    const srvSteps = [...m[1].matchAll(/\{\s*s:\s*'(\w+)',\s*a:\s*'(\w+)'/g)]
+      .map((x) => x[1] + ':' + x[2]);
+    const cliSteps = D.MODES.find((x) => x.id === 'kpl').steps.map((x) => x.s + ':' + x.a);
+    eq(srvSteps.join(','), cliSteps.join(','), '服务端 kpl 顺序与客户端逐项一致');
+    eq(srvSteps.length, 18, '服务端也是 18 步');
+  }
 }
 
 section('全局 BP 池：本方选过的英雄本方不能再选');

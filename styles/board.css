@@ -254,15 +254,53 @@ body.boss .stage { padding: 0; height: 100vh; }
   min-width: 0;
 }
 
-.team-col::before {
-  content: attr(data-label);
+/* 旧的 `::before` 小标签已被战队名横条取代，隐藏掉避免重复 */
+.team-col::before { display: none; }
+
+/* ---------- 战队名横条（直播画面上显示「哪支队在蓝/红方」） ---------- */
+.team-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 11px 5px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(255, 255, 255, .05), rgba(255, 255, 255, .01));
+  min-height: 42px;
+  flex: 0 0 auto;
+}
+.team-head-blue {
+  border-color: rgba(58, 160, 255, .42);
+  background: linear-gradient(180deg, rgba(58, 160, 255, .18), rgba(58, 160, 255, .03));
+}
+.team-head-red {
+  border-color: rgba(255, 77, 94, .42);
+  background: linear-gradient(180deg, rgba(255, 77, 94, .18), rgba(255, 77, 94, .03));
+  flex-direction: row-reverse;
+}
+.team-head-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 30px;
+  font-weight: 800;
+  line-height: 1.1;
+  letter-spacing: 1px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.team-head-blue .team-head-name { color: #a9d6ff; }
+.team-head-red .team-head-name { color: #ffc3ca; text-align: right; }
+/* 有真实队名时用纯白，和「蓝方/红方」占位区分开 */
+.team-head.is-custom .team-head-name { color: #fff; text-shadow: 0 2px 12px rgba(0, 0, 0, .55); }
+.team-head-side {
+  flex: 0 0 auto;
   font-family: var(--font-num);
   font-size: 11px;
   letter-spacing: 3px;
-  color: #4e6386;
-  padding-left: 2px;
+  color: #56698c;
 }
-.team-red::before { text-align: right; padding-right: 2px; }
 
 /* 单个 pick 卡：右侧原画 + 左侧信息 */
 .pick-slot {

@@ -355,6 +355,66 @@ img.img-failed { visibility: hidden; }
 .hero-grid.wz-bp-locked { opacity: .45; }
 .hero-grid.wz-bp-locked .hero-card { pointer-events: none; }
 
+/* v3：战队名输入条（控制台顶部） */
+.team-name-bar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 14px 8px;
+  flex-wrap: wrap;
+}
+.team-name-bar[hidden] { display: none; }
+.tnb-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 1 1 200px;
+  min-width: 0;
+  padding: 5px 10px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+}
+.tnb-item.tnb-blue { border-color: rgba(58, 160, 255, .42); }
+.tnb-item.tnb-red { border-color: rgba(255, 77, 94, .42); }
+.tnb-tag {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  line-height: 20px;
+  text-align: center;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 800;
+}
+.tnb-blue .tnb-tag { background: rgba(58, 160, 255, .2); color: #a9d6ff; }
+.tnb-red .tnb-tag { background: rgba(255, 77, 94, .2); color: #ffc3ca; }
+.tnb-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  padding: 2px 0;
+}
+.tnb-input:focus { outline: none; }
+.tnb-input::placeholder { color: var(--text-faint); }
+
+#wzBpLockNote {
+  margin: 0 0 8px;
+  padding: 9px 12px;
+  border-radius: 9px;
+  border: 1px dashed #6b4a1c;
+  background: rgba(240, 166, 60, .1);
+  color: #ffd894;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.hero-grid.wz-bp-locked { opacity: .45; }
+.hero-grid.wz-bp-locked .hero-card { pointer-events: none; }
+
 /* 英雄卡 */
 .hero-card {
   position: relative;
