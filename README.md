@@ -2,7 +2,7 @@
 
 > 给直播和开黑用的 BP（Ban/Pick）工具：**双击就能用**，也能一键架到服务器上开房间多人 BP、把每局存下来回放。
 
-![四种赛制](shots/board-kpl.png)
+![四种赛制](shots/board-kpl.jpg)
 
 <p>
   <img alt="静态可用" src="https://img.shields.io/badge/静态-双击即用-3aa0ff">
@@ -53,15 +53,15 @@ cd wzbp && sudo bash install.sh --domain bp.example.com
 
 | BP 展示板（OBS 采集画面） | 控制台 |
 | --- | --- |
-| ![展示板](shots/board-ranked.png) | ![控制台](shots/console.png) |
+| ![展示板](shots/board-ranked.jpg) | ![控制台](shots/console.jpg) |
 
 | MVP 数据面板 | 赛前面板 |
 | --- | --- |
-| ![MVP](shots/overlay-mvp.png) | ![赛前](shots/overlay-pre.png) |
+| ![MVP](shots/overlay-mvp.jpg) | ![赛前](shots/overlay-pre.jpg) |
 
 | 双窗口直播（控制窗 + 展示窗各一个 OBS 源） |
 | --- |
-| ![双窗口](shots/dual-display.png) |
+| ![双窗口](shots/dual-display.jpg) |
 
 ---
 
