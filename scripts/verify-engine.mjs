@@ -212,50 +212,48 @@ section('撤销 / 重做');
   eq(D.undo().ok, false, '到底后不能再撤销');
 }
 
-section('全局 BP（蓝B1 红B1 蓝B1 红B1 → 蓝P1 红P2 蓝P2 红P1 → 红B1 蓝B1 红B1 蓝B1 → 红P1 蓝P2 红P1，18 手）');
+section('全局 BP（每队 5 ban + 5 pick，20 手：先 ban2 后 ban3）');
 {
   const plan = autoPlay('kpl');
-  eq(plan.length, 18, '共执行 18 手');
+  eq(plan.length, 20, '共执行 20 手');
   const blueprint = plan.map((p) => (p.side === 'blue' ? 'B' : 'R') + p.action[0].toUpperCase()).join(',');
   eq(blueprint, [
-    /* 第一轮禁用：蓝B1 红B1 蓝B1 红B1 */
+    /* 第一轮禁用：双方各 2 个（交替，蓝先） */
     'BB', 'RB', 'BB', 'RB',
     /* 第一轮选择：蓝P1 红P2 蓝P2 红P1 */
     'BP', 'RP', 'RP', 'BP', 'BP', 'RP',
-    /* 第二轮禁用：红B1 蓝B1 红B1 蓝B1 */
-    'RB', 'BB', 'RB', 'BB',
+    /* 第二轮禁用：双方各 3 个（交替，红先） */
+    'RB', 'BB', 'RB', 'BB', 'RB', 'BB',
     /* 第二轮选择：红P1 蓝P2 红P1 */
     'RP', 'BP', 'BP', 'RP'
-  ].join(','), '顺序与用户给的记法逐项一致');
+  ].join(','), '顺序为 先 ban2（蓝红蓝红）→ P1-2-2-1 → 后 ban3（红蓝红蓝红蓝）→ P1-2-1');
 
   /* 阶段边界 */
   const bans1 = plan.slice(0, 4);
-  eq(bans1.filter((p) => p.action === 'ban').length, 4, '第一轮 4 个 ban');
-  eq(bans1.filter((p) => p.side === 'blue').length, 2, '第一轮蓝方 2 ban');
-  eq(bans1.filter((p) => p.side === 'red').length, 2, '第一轮红方 2 ban');
+  eq(bans1.length, 4, '第一轮禁用 4 个 ban（各 2）');
+  eq(bans1.map((p) => (p.side === 'blue' ? 'B' : 'R')).join(''), 'BRBR', '第一轮禁用交替、蓝先');
   const picks1 = plan.slice(4, 10);
+  eq(picks1.length, 6, '第一轮选择 6 手');
   eq(picks1.map((p) => (p.side === 'blue' ? 'B' : 'R')).join(''), 'BRRBBR',
     '第一轮 pick 是 蓝P1 红P2 蓝P2 红P1（BRRBBR）');
-  const bans2 = plan.slice(10, 14);
-  eq(bans2.filter((p) => p.action === 'ban').length, 4, '第二轮 4 个 ban');
-  eq(bans2.map((p) => (p.side === 'blue' ? 'B' : 'R')).join(''), 'RBRB',
-    '第二轮 ban 是 红B1 蓝B1 红B1 蓝B1（RBRB）');
-  const picks2 = plan.slice(14);
+  const bans2 = plan.slice(10, 16);
+  eq(bans2.length, 6, '第二轮禁用 6 个 ban（各 3）');
+  eq(bans2.map((p) => (p.side === 'blue' ? 'B' : 'R')).join(''), 'RBRBRB', '第二轮禁用交替、红先');
+  const picks2 = plan.slice(16);
   eq(picks2.map((p) => (p.side === 'blue' ? 'B' : 'R')).join(''), 'RBBR',
     '第二轮 pick 是 红P1 蓝P2 红P1（RBBR）');
 
   const s = D.state();
-  eq(s.cap.blue.ban, 4, '蓝方 4 个 ban 位');
-  eq(s.cap.red.ban, 4, '红方 4 个 ban 位');
+  eq(s.cap.blue.ban, 5, '蓝方 5 个 ban 位');
+  eq(s.cap.red.ban, 5, '红方 5 个 ban 位');
   eq(s.cap.blue.pick, 5, '蓝方 5 个 pick 位');
   eq(s.cap.red.pick, 5, '红方 5 个 pick 位');
-  eq(s.bans.blue.length + s.bans.red.length, 8, '共 8 ban');
-  eq(s.picks.blue.length + s.picks.red.length, 10, '共 10 pick');
-  /* 双方必须完全对称：各 4 ban + 5 pick */
-  eq(s.bans.blue.length, 4, '蓝方 ban 数 = 4');
-  eq(s.bans.red.length, 4, '红方 ban 数 = 4');
+  eq(s.bans.blue.length, 5, '蓝方 ban 数 = 5（先 2 后 3）');
+  eq(s.bans.red.length, 5, '红方 ban 数 = 5（先 2 后 3）');
   eq(s.picks.blue.length, 5, '蓝方 pick 数 = 5');
   eq(s.picks.red.length, 5, '红方 pick 数 = 5');
+  eq(s.bans.blue.length + s.bans.red.length, 10, '共 10 ban');
+  eq(s.picks.blue.length + s.picks.red.length, 10, '共 10 pick');
   eq(s.done, true, '能正常走完');
   eq(s.global, true, '标记为全局 BP 赛制');
 }
@@ -273,7 +271,7 @@ section('赛制顺序与服务端镜像逐项一致（防止两边漂移）');
       .map((x) => x[1] + ':' + x[2]);
     const cliSteps = D.MODES.find((x) => x.id === 'kpl').steps.map((x) => x.s + ':' + x.a);
     eq(srvSteps.join(','), cliSteps.join(','), '服务端 kpl 顺序与客户端逐项一致');
-    eq(srvSteps.length, 18, '服务端也是 18 步');
+    eq(srvSteps.length, 20, '服务端也是 20 步');
   }
 }
 
@@ -283,24 +281,31 @@ section('全局 BP 池：本方选过的英雄本方不能再选');
   /* 模拟服务端下发「蓝方上一局用过 105」 */
   D.setGlobalUsed({ blue: [105], red: [] });
 
-  /* 走到 pick 阶段：把 4 个 ban 落掉 */
+  /* 走到 pick 阶段：把第一轮 6 个 ban 落掉。
+     注意要用**池尾**的英雄，别把断言要用的 105 / heroId(30/31) 提前消耗掉。 */
   let guard = 0;
   while (D.state().stepInfo && D.state().stepInfo.action !== 'pick' && guard++ < 10) {
     const s = D.state();
-    D.apply(s.stepInfo.side, s.stepInfo.action, s.pool[0]);
+    D.apply(s.stepInfo.side, s.stepInfo.action, s.pool[s.pool.length - 1]);
   }
   eq(D.state().stepInfo.action, 'pick', '进入 pick 阶段');
 
-  /* 红方一选，然后轮到蓝方 —— 105 应被全局池挡住 */
-  D.apply('red', 'pick', heroId(30));
+  /* 现在轮到 蓝P1（新顺序第一轮选择是蓝方先手）——
+     105 是蓝方上一局用过的，应被全局池挡住 */
   const blocked = D.apply('blue', 'pick', 105);
   eq(blocked.ok, false, '蓝方不能选自己上一局用过的英雄');
   ok(/全局 BP/.test(blocked.reason || ''), '拒绝原因点明全局 BP', blocked.reason || '');
 
-  /* 单边限制：红方用过的英雄蓝方可以选 */
+  /* 落掉蓝方这一手，轮到红方 */
+  D.apply('blue', 'pick', heroId(30));
+  eq(D.state().stepInfo.side, 'red', '蓝方落子后轮到红方');
+
+  /* 单边限制：红方用过的英雄，蓝方之后仍可以选 */
   D.setGlobalUsed({ blue: [105], red: [heroId(30)] });
-  const stillOk = D.apply('blue', 'pick', heroId(31));
-  ok(stillOk.ok, '对方用过的英雄，本方可以正常选（单边限制）', stillOk.reason || '');
+  const redPick = D.apply('red', 'pick', heroId(31));
+  ok(redPick.ok, '红方可以选（31 未被全局池占用）', redPick.reason || '');
+  const blueNext = D.apply('red', 'pick', heroId(32));
+  ok(blueNext.ok, '红P2 的第二手也能落', blueNext.reason || '');
 
   /* 全局池不限制 ban */
   D.init('kpl');

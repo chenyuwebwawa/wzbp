@@ -211,12 +211,12 @@ const EXPECTED = {
     'red:pick', 'blue:pick', 'blue:pick', 'red:pick'
   ],
   kpl: [
-    /* 第一轮禁用：蓝B1 红B1 蓝B1 红B1 */
+    /* 第一轮禁用：双方各 2 个（交替，蓝先） */
     'blue:ban', 'red:ban', 'blue:ban', 'red:ban',
     /* 第一轮选择：蓝P1 红P2 蓝P2 红P1 */
     'blue:pick', 'red:pick', 'red:pick', 'blue:pick', 'blue:pick', 'red:pick',
-    /* 第二轮禁用：红B1 蓝B1 红B1 蓝B1 */
-    'red:ban', 'blue:ban', 'red:ban', 'blue:ban',
+    /* 第二轮禁用：双方各 3 个（交替，红先） */
+    'red:ban', 'blue:ban', 'red:ban', 'blue:ban', 'red:ban', 'blue:ban',
     /* 第二轮选择：红P1 蓝P2 红P1 */
     'red:pick', 'blue:pick', 'blue:pick', 'red:pick'
   ],
@@ -380,27 +380,27 @@ async function runSuite() {
          → 红B1 蓝B1 红B1 蓝B1 → 红P1 蓝P2 红P1 */
       const r1ban = ord.slice(0, 4);
       const r1pick = ord.slice(4, 10);
-      const r2ban = ord.slice(10, 14);
-      const r2pick = ord.slice(14);
+      const r2ban = ord.slice(10, 16);
+      const r2pick = ord.slice(16);
       const cnt = (arr, side, act) => arr.filter((s) => s.s === side && s.a === act).length;
-      checkEq('kpl 第一轮禁用 4 ban', r1ban.length, 4);
+      checkEq('kpl 第一轮禁用 4 ban（先 ban2）', r1ban.length, 4);
       checkEq('kpl 第一轮禁用对半（蓝2红2）',
         cnt(r1ban, 'blue', 'ban') + ',' + cnt(r1ban, 'red', 'ban'), '2,2');
       checkEq('kpl 第一轮禁用先手方 = 蓝', r1ban[0].s, 'blue');
       checkEq('kpl 第一轮选择 6 pick 且先手方 = 蓝', r1pick.length + '@' + r1pick[0].s, '6@blue');
       checkEq('kpl 第一轮选择是 蓝P1 红P2 蓝P2 红P1',
         r1pick.map((s) => (s.s === 'blue' ? 'B' : 'R')).join(''), 'BRRBBR');
-      checkEq('kpl 第二轮禁用 4 ban 且先手方 = 红', r2ban.length + '@' + r2ban[0].s, '4@red');
+      checkEq('kpl 第二轮禁用 6 ban（后 ban3）且先手方 = 红', r2ban.length + '@' + r2ban[0].s, '6@red');
       checkEq('kpl 第二轮禁用是 红B1 蓝B1 红B1 蓝B1',
-        r2ban.map((s) => (s.s === 'blue' ? 'B' : 'R')).join(''), 'RBRB');
+        r2ban.map((s) => (s.s === 'blue' ? 'B' : 'R')).join(''), 'RBRBRB');
       checkEq('kpl 第二轮选择 4 pick 且先手方 = 红', r2pick.length + '@' + r2pick[0].s, '4@red');
       checkEq('kpl 第二轮选择是 红P1 蓝P2 红P1',
         r2pick.map((s) => (s.s === 'blue' ? 'B' : 'R')).join(''), 'RBBR');
-      checkEq('kpl 合计 8 ban + 10 pick',
-        ord.filter((s) => s.a === 'ban').length + '+' + ord.filter((s) => s.a === 'pick').length, '8+10');
-      checkEq('kpl 每队 4 ban + 5 pick（双方对称）',
+      checkEq('kpl 合计 10 ban + 10 pick',
+        ord.filter((s) => s.a === 'ban').length + '+' + ord.filter((s) => s.a === 'pick').length, '10+10');
+      checkEq('kpl 每队 5 ban + 5 pick（双方对称）',
         [cnt(ord, 'blue', 'ban'), cnt(ord, 'red', 'ban'), cnt(ord, 'blue', 'pick'), cnt(ord, 'red', 'pick')].join(','),
-        '4,4,5,5');
+        '5,5,5,5');
     }
     if (mode === 'peak') {
       check('peak 首项为 {s:"both",a:"ban",n:3}', !!ord && ord[0].s === 'both' && ord[0].a === 'ban' && ord[0].n === 3,
@@ -931,11 +931,11 @@ async function runSuite() {
   checkEq('对方上一局选过的英雄 → 允许（单边限制）', gpCross.json && gpCross.json.ok, true);
   if (gpCross.json && gpCross.json.ok) gpUsed.push(bluePick1);
 
-  /* 第二局继续落满剩余 12 手：验证「整局 18 手」与全局池共存 */
+  /* 第二局继续落满剩余 14 手：验证「整局 20 手」与全局池共存 */
   let gpRest = 0;
   let gpRestOk = true;
   let gpRestDetail = '';
-  for (let i = 6; i < 18; i++) {
+  for (let i = 6; i < 20; i++) {
     const st = await api('GET', '/api/rooms/' + gpCode + '/state');
     const na = st.json.game.nextAction;
     const expect = EXPECTED.kpl[i].split(':');
@@ -951,13 +951,13 @@ async function runSuite() {
     gpUsed.push(hero);
     gpRest += 1;
   }
-  check('kpl 第二局剩余 12 手全部按蓝图落成', gpRestOk && gpRest === 12, gpRestDetail || ('落了 ' + gpRest + ' 手'));
+  check('kpl 第二局剩余 14 手全部按蓝图落成', gpRestOk && gpRest === 14, gpRestDetail || ('落了 ' + gpRest + ' 手'));
   const gpEnd = await api('GET', '/api/rooms/' + gpCode + '/state');
-  checkEq('kpl 单局 actions=18（整局 18 手对得上）', gpEnd.json.actions.length, 18);
-  checkEq('kpl done=true 且 stepIndex=18', gpEnd.json.game.done + '/' + gpEnd.json.game.stepIndex, 'true/18');
-  checkEq('kpl 双方各 4 ban / 5 pick',
+  checkEq('kpl 单局 actions=20（整局 20 手对得上）', gpEnd.json.actions.length, 20);
+  checkEq('kpl done=true 且 stepIndex=20', gpEnd.json.game.done + '/' + gpEnd.json.game.stepIndex, 'true/20');
+  checkEq('kpl 双方各 5 ban / 5 pick',
     [gpEnd.json.game.bans.blue.length, gpEnd.json.game.bans.red.length,
-      gpEnd.json.game.picks.blue.length, gpEnd.json.game.picks.red.length].join(','), '4,4,5,5');
+      gpEnd.json.game.picks.blue.length, gpEnd.json.game.picks.red.length].join(','), '5,5,5,5');
   check('整局跑完后 globalUsed 仍跨局累计（双方各 ≥5）',
     gpEnd.json.game.globalUsed.blue.length >= 5 && gpEnd.json.game.globalUsed.red.length >= 5,
     'blue=' + gpEnd.json.game.globalUsed.blue.length + ' red=' + gpEnd.json.game.globalUsed.red.length);

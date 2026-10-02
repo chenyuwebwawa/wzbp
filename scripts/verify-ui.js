@@ -254,7 +254,7 @@ window.__SMOKE__ = (function () {
     await wait(220);
     eq(document.querySelectorAll('.ban-slot.filled').length, 2, '点重做后 DOM 回到 2 个 ban');
 
-    /* ---------- 10. 全局 BP 模式切换（B2P3 → B3P2，每队 5 ban + 5 pick） ---------- */
+    /* ---------- 10. 全局 BP 模式切换（每队 5 ban + 5 pick，20 手） ---------- */
     var kplBtn = Array.prototype.filter.call(document.querySelectorAll('#modeSwitch button'),
       function (b) { return b.dataset.mode === 'kpl'; })[0];
     ok(!!kplBtn, '全局 BP 模式按钮存在');
@@ -263,10 +263,10 @@ window.__SMOKE__ = (function () {
       kplBtn.click();
       await wait(250);
       eq(D.state().mode, 'kpl', '已切到全局 BP');
-      eq(D.state().totalSteps, 18, '全局 BP 共 18 手');
+      eq(D.state().totalSteps, 20, '全局 BP 共 20 手');
       var visBlue = Array.prototype.filter.call(document.querySelectorAll('#banLaneBlue .ban-slot'),
         function (n) { return n.style.display !== 'none'; }).length;
-      eq(visBlue, 4, '全局 BP 显示 4 个蓝方 ban 位');
+      eq(visBlue, 5, '全局 BP 显示 5 个蓝方 ban 位');
       ok(/全局\s*BP/.test(document.querySelector('#boardMode').textContent),
         '展示板标题切到全局 BP', document.querySelector('#boardMode').textContent);
       /* 用户明确要求：赛制标题就叫「全局 BP」，不要带 B2P3 之类的细节 */
@@ -405,7 +405,7 @@ window.__SMOKE__ = (function () {
       var guard2 = 0;
       while (!D.state().done && guard2++ < 40) {
         var st3 = D.state();
-        if (st3.stepInfo.action === 'pick' && st3.bans.blue.length >= 4 && st3.bans.red.length >= 4) break;
+        if (st3.stepInfo.action === 'pick' && st3.bans.blue.length >= 5 && st3.bans.red.length >= 5) break;
         var r3 = D.apply(st3.stepInfo.side === 'both' ? 'blue' : st3.stepInfo.side,
           st3.stepInfo.action, st3.pool[0]);
         if (!r3.ok) break;
@@ -415,9 +415,9 @@ window.__SMOKE__ = (function () {
       var redBanFilled = document.querySelectorAll('#banLaneRed .ban-slot.filled').length;
       var visBlueBans = Array.prototype.filter.call(document.querySelectorAll('#banLaneBlue .ban-slot'),
         function (n) { return n.style.display !== 'none'; }).length;
-      ok(visBlueBans >= 4, '全局 BP 下展示板为单侧预留了 ≥4 个 ban 位', '可见 ' + visBlueBans + ' 个');
-      eq(blueBanFilled + redBanFilled, 8,
-        '两轮共 8 个 ban 全部落在展示板上（累计填充 ' + (blueBanFilled + redBanFilled) + ' 个）');
+      ok(visBlueBans >= 5, '全局 BP 下展示板为单侧预留了 ≥5 个 ban 位', '可见 ' + visBlueBans + ' 个');
+      eq(blueBanFilled + redBanFilled, 10,
+        '两轮共 10 个 ban 全部落在展示板上（累计填充 ' + (blueBanFilled + redBanFilled) + ' 个）');
       eq(blueBanFilled, Math.min(D.state().cap.blue.ban, D.state().bans.blue.length),
         '蓝方填满的 ban 位数量与实际 ban 数一致');
     }
