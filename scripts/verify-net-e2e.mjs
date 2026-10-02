@@ -236,6 +236,50 @@ try {
   check('服务端拒绝未开局的落子（ERR_NOT_LAUNCHED）',
     String(rejectRes).indexOf('ERR_NOT_LAUNCHED') === 0, String(rejectRes));
 
+  /* 用户的第一条要求：「先选择加入队伍」——面板上必须真的有可点的席位 */
+  const seatUI = JSON.parse(await evalIn(A, `JSON.stringify((function(){
+    var drawer = document.getElementById('wzRoomDrawer');
+    if (!drawer) return { open:false, seats:0, teamBlocks:0, text:'' };
+    var seats = drawer.querySelectorAll('.wz-seat');
+    var teams = drawer.querySelectorAll('.wz-team');
+    var txt = drawer.textContent || '';
+    return {
+      open: window.WZ.roomUI.isOpen(),
+      seats: seats.length,
+      clickable: Array.prototype.filter.call(seats, function(s){ return s.tagName === 'BUTTON'; }).length,
+      teamBlocks: teams.length,
+      hasJoinHint: /加入队伍|点空位坐下/.test(txt),
+      hasWaitTitle: /等待管理员开始\\s*BP/.test(txt)
+    };
+  })())`));
+  console.log('  ' + JSON.stringify(seatUI));
+  check('房间里能「加入队伍」：蓝红两栏 + 10 个可点席位',
+    seatUI.teamBlocks === 2 && seatUI.seats === 10 && seatUI.clickable === 10, JSON.stringify(seatUI));
+  check('界面上明确提示「加入队伍 / 点空位坐下」', seatUI.hasJoinHint === true, JSON.stringify(seatUI));
+  check('未开局时标题写明「等待管理员开始 BP」', seatUI.hasWaitTitle === true, JSON.stringify(seatUI));
+
+  /* 真正点一下空席位，验证「加入队伍」这条 UI 路径通 */
+  const clicked = await evalIn(A, `(function(){
+    var btn = document.querySelector('#wzRoomDrawer .wz-seat');
+    if (!btn) return 'NO_SEAT';
+    var before = window.WZ.roomUI.state();
+    var n0 = (before && before.players || []).length;
+    btn.click();
+    return new Promise(function(res){
+      setTimeout(function(){
+        var s = window.WZ.roomUI.state();
+        res(JSON.stringify({ n0:n0, n1:((s&&s.players)||[]).length, me:!!(s&&s.me) }));
+      }, 1200);
+    });
+  })()`);
+  if (String(clicked).indexOf('NO_SEAT') === 0) {
+    check('点击席位能加入队伍', false, String(clicked));
+  } else {
+    const ck = JSON.parse(clicked);
+    check('点击席位能加入队伍（人数增加且自己已入座）',
+      ck.n1 > ck.n0 || ck.me === true, JSON.stringify(ck));
+  }
+
   /* ---------- ③ 管理员开局 ---------- */
   console.log('\n[3] 管理员开局 → 面板解锁');
   const launchRes = await evalIn(A, `(function(){

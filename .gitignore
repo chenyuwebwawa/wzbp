@@ -17,6 +17,10 @@ _shottest.html
 .recon/
 .wzbp-install-state
 
+# overlay 自检每次都会重新生成这两个 PNG（README 用的是同名 .jpg 压缩版）
+shots/overlay-mvp.png
+shots/overlay-pre.png
+
 # 编辑器 / 系统
 .vscode/
 .idea/

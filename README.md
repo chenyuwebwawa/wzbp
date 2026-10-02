@@ -336,7 +336,7 @@ node scripts/verify-offline.mjs     # 断网可用性（19 项，用 CDP 拦掉�
 
 # 联网相关（需要先起服务，见 docs/宝塔部署教程.md）
 node scripts/verify-server.mjs                                 # 后端接口（真库 346 项；无库自动跳过）
-node scripts/verify-net-e2e.mjs --base=http://127.0.0.1:8787    # 联网端到端（34 项，真库）
+node scripts/verify-net-e2e.mjs --base=http://127.0.0.1:8787    # 联网端到端（38 项，真库）
 ```
 
 浏览器端 UI 自检（118 项，需要 Chrome）：
