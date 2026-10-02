@@ -1146,19 +1146,40 @@ render_env() {
     port_display="$PORT"
   fi
   cat <<EOF
-# wzbp · 王者荣耀 BP 展示台 —— 运行时环境变量（由 install.sh 生成，chmod 600）
-# 服务端 server/config.js 只读这些环境变量；这个文件已被 .gitignore 忽略，别提交。
+# =============================================================================
+#  wzbp · 王者荣耀 BP 展示台 —— 运行时环境变量（由 install.sh 生成）
+# =============================================================================
+#  这个文件含数据库密码，已被 .gitignore 忽略 → 不要提交到 git。
+#  改完任何一项都要重启服务才生效：
+#     systemctl restart wzbp      # systemd
+#     pm2 restart wzbp --update-env   # pm2
+#     宝塔面板 → 网站 → Node 项目 → 重启
 #
-# 手动试跑（教程 §5）：
-#   cd ${DIR} && set -a && . ./.env && set +a && node server/index.js
-# 注意：服务只监听 127.0.0.1，外网访问走 Nginx 反代（教程 §7）。
+#  手动试跑（排错用）：
+#     cd ${DIR} && set -a && . ./.env && set +a && node server/index.js
+#
+#  服务只监听 127.0.0.1（写死的），外网访问走 Nginx 反代。
+#  完整变量说明见项目里的 .env.example
+# =============================================================================
 
-WZBP_PORT=${port_display}
+# ---------- 必填：数据库密码（必须与 MySQL 里该用户的真实密码一致）----------
+WZBP_DB_PASSWORD="${pass_display}"
+
+# ---------- 数据库 ----------
+WZBP_DB_NAME="$(env_escape "$DB_NAME")"
+WZBP_DB_USER="$(env_escape "$DB_USER")"
 WZBP_DB_HOST="${DB_HOST}"
 WZBP_DB_PORT=${DB_PORT}
-WZBP_DB_USER="$(env_escape "$DB_USER")"
-WZBP_DB_PASSWORD="${pass_display}"
-WZBP_DB_NAME="$(env_escape "$DB_NAME")"
+# 连接池大小（1..50，默认 10；1核1G 保持 10 即可）
+# WZBP_DB_POOL=10
+# 连接超时毫秒（1000..60000，默认 10000）
+# WZBP_DB_CONNECT_TIMEOUT=10000
+
+# ---------- 服务端口（改了这里，Nginx 反代的 proxy_pass 也要同步改）----------
+WZBP_PORT=${port_display}
+
+# ---------- 仅自检用，生产环境保持注释 ----------
+# WZBP_DB_DRIVER=memory
 EOF
 }
 
@@ -1269,7 +1290,7 @@ render_bt_script() {
 # 宝塔面板 → 网站 → Node 项目 → 添加：
 #   项目名称 wzbp / 项目目录 ${DIR} / 启动文件 ${BT_RUN_NAME}
 #   （启动方式选「自定义命令」或直接把这个文件当启动文件）
-#   环境变量面板里逐条填 .env 里的 6 条（面板不会自动读 .env）
+#   环境变量面板里逐条对照 .env 填（完整变量清单见 .env.example）（面板不会自动读 .env）
 # =============================================================================
 cd "${DIR}" || exit 1
 [ -f .env ] && set -a && . ./.env && set +a
