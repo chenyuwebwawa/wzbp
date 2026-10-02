@@ -858,3 +858,8 @@ body.role-display .stage { padding: 12px; height: 100vh; }
 .rg-btn.on.is-red { border-color: rgba(255,77,94,.7); background: rgba(255,77,94,.2); color: #ffc3ca; }
 .rg-btn.on.is-none { border-color: #3a4a66; background: var(--panel-3); }
 .sd-hint { margin-bottom: 8px; color: var(--text-faint); font-size: 12.5px; line-height: 1.7; }
+
+/* 空 ban 按钮：禁用阶段可以不下手 */
+.act-empty-ban { margin-top: 2px; font-size: 12.5px; }
+.act-empty-ban:not([disabled]) { border-color: rgba(126,144,173,.6); color: #cfdcf0; }
+.act-empty-ban:not([disabled]):hover { border-color: var(--gold); color: var(--gold); }

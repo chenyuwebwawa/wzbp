@@ -379,6 +379,17 @@ HTTP 状态码与 `code` 一一对应：
 > 所以 `verify-engine.mjs` 里有一条断言**直接读 `server/draft.js` 与 `js/draft.js` 逐项比对**，
 > 而不是靠人眼同步。改顺序时只要改客户端 + 服务端，跑一次自检就知道同没同步上。
 
+### 6.1.1 空 ban（v5 新增）
+
+禁用阶段允许**不下手**（俗称空 ban）：
+
+- 请求体 `heroId: 0` 表示空 ban。**只有 `action="ban"` 允许**；
+  `action="pick"` 传 0 → 400 `ERR_BAD_PARAM`（选人必须真选一个）。
+- 负数 / 非整数一律 400，**只有 0 算空 ban**。
+- 空 ban 占一个 ban 位、**不消耗英雄、不进全局池**、不影响「本局已 ban/pick」判定。
+- 落库：`hero_id = 0`、`hero_name = "空BAN"`（`actions` 表不用改结构）。
+- 回放 / 历史列表 / SSE / `game.bans` 都原样带 0，前端渲染成「空BAN」。
+
 ### 6.2 `random`：随机征召（顺序随机，英雄仍手动选）
 
 1. 开局由服务端洗牌生成本局 `order`：
@@ -551,4 +562,5 @@ server/
 | 顺序漂移防线 | 无 | `verify-engine.mjs` 直接读 `server/draft.js` 与 `js/draft.js` 逐项比对 |
 | 战队名 | 只有赛前面板能填 | BP 展示板也显示（队伍栏横条），控制台顶部可直接改 |
 | 战队头像 | 无 | 展示板 / 战绩面板 / 采集画面都显示；控制台上传后自动缩到 128px |
+| 空 ban | 不支持（heroId 必须是正整数） | `heroId: 0` = 空 ban；只有禁用阶段允许，选人传 0 报 400 |
 | 战绩面板 | 无 | `overlay.html?mode=record`：大比分、每局胜负、冠军横幅 |

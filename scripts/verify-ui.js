@@ -323,7 +323,46 @@ window.__SMOKE__ = (function () {
       }
     }
 
-    /* ---------- 10c. 战队头像 ---------- */
+    /* ---------- 10c. 空 ban ---------- */
+    {
+      D.init('kpl');
+      await wait(220);
+      var emptyBtn = document.getElementById('actEmptyBan');
+      ok(!!emptyBtn, '步骤提示条上有「空 BAN」按钮（不需要先选英雄）');
+      if (emptyBtn) {
+        eq(emptyBtn.disabled, false, '禁用阶段空 BAN 按钮可用');
+        ok(/空\s*BAN/.test(emptyBtn.textContent), '按钮文案是空 BAN', emptyBtn.textContent);
+        /* 点一下：应该占掉一个 ban 位并在展示板上写「空BAN」 */
+        emptyBtn.click();
+        await wait(340);
+        var st = D.state();
+        eq(st.bans.blue[0], 0, '点击后 ban 位记录为 0');
+        var slot0 = document.querySelectorAll('#banLaneBlue .ban-slot')[0];
+        ok(slot0.classList.contains('is-empty-ban'), '展示板第一个 ban 位标记为空 ban');
+        eq(slot0.querySelector('.bs-name').textContent, '空BAN', '展示板显示「空BAN」字样');
+        ok(!slot0.classList.contains('was-empty'), '空 ban 不被当成「还没用」的空位');
+        ok(!slot0.classList.contains('filled'), '空 ban 不算已 ban 英雄');
+        eq(D.state().pool.length, 133, '空 ban 不消耗英雄可选池');
+        /* 轮到红方禁用时，红方也能空 */
+        await wait(140);
+        eq(D.state().stepInfo.side, 'red', '空 ban 后轮到红方');
+        ok(D.canEmptyBan('red'), '红方此时也能空 ban');
+      }
+
+      /* 到了 pick 阶段按钮要禁用 */
+      D.init('kpl');
+      for (var eb = 0; eb < 4; eb++) {
+        var se = D.state();
+        D.apply(se.stepInfo.side, se.stepInfo.action, se.pool[0]);
+      }
+      await wait(280);
+      eq(D.state().stepInfo.action, 'pick', '已进入选择阶段');
+      var eb2 = document.getElementById('actEmptyBan');
+      ok(!!eb2 && eb2.disabled === true, '选择阶段空 BAN 按钮被禁用');
+      ok(!!eb2 && /选择阶段|不能空/.test(eb2.title || ''), '按钮 title 说明了原因', eb2 ? eb2.title : '');
+    }
+
+    /* ---------- 10d. 战队头像 ---------- */
     {
       ok(typeof WZ.board.setTeams === 'function', 'board 暴露了 setTeams（名字 + 头像）');
       var logoBtn = document.querySelector('#teamNameBar .tnb-logo');

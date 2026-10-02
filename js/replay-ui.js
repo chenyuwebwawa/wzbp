@@ -179,9 +179,17 @@ window.WZ = window.WZ || {};
     return out;
   }
 
-  /* 英雄对象：数据里有就用数据里的（有原画/皮肤），没有就用 id+名字兜底 */
+  /* 英雄对象：数据里有就用数据里的（有原画/皮肤），没有就用 id+名字兜底。
+     heroId=0（或 heroName=空BAN）是空 ban：不当作英雄，只在文案里体现。 */
+  function isBlankBan(a) {
+    if (!a) return false;
+    if (String(a.heroName || a.hero_name || '') === '空BAN') return true;
+    var id = a.heroId !== undefined && a.heroId !== null ? a.heroId : a.hero_id;
+    return Number(id) === 0;
+  }
+
   function heroOf(a) {
-    if (!a) return null;
+    if (!a || isBlankBan(a)) return null;
     var h = util().heroById ? util().heroById(a.heroId) : null;
     if (h) return h;
     if (a.heroId === undefined || a.heroId === null || a.heroId === '') return null;
@@ -189,6 +197,7 @@ window.WZ = window.WZ || {};
   }
 
   function heroNameOf(a) {
+    if (isBlankBan(a)) return '空BAN';
     var h = util().heroById ? util().heroById(a.heroId) : null;
     return (h && h.name) || a.heroName || (a.heroId !== undefined && a.heroId !== null ? '#' + a.heroId : '未知');
   }
@@ -769,12 +778,23 @@ window.WZ = window.WZ || {};
      ============================================================ */
 
   function fillBanSlot(slot, heroId) {
-    var hero = heroId === undefined || heroId === null ? null : util().heroById(heroId);
+    var blank = Number(heroId) === 0;
+    var hero = (heroId === undefined || heroId === null || blank) ? null : util().heroById(heroId);
     var img = slot.querySelector('img');
     var nameEl = slot.querySelector('.bs-name');
+    var emptyEl = slot.querySelector('.bs-empty');
     slot.style.display = '';
-    slot.classList.toggle('was-empty', !hero);
+    /* 空 ban 是「用了这个位但没 ban 英雄」，要跟「还没轮到的空位」区分 */
+    slot.classList.toggle('was-empty', !hero && !blank);
+    slot.classList.toggle('is-empty-ban', blank);
     slot.classList.toggle('filled', !!hero);
+    if (blank) {
+      if (img) img.parentNode.removeChild(img);
+      if (emptyEl) setText(emptyEl, '');
+      setText(nameEl, '空BAN');
+      return;
+    }
+    if (emptyEl) setText(emptyEl, 'BAN');
     if (hero) {
       if (!img) {
         img = document.createElement('img');

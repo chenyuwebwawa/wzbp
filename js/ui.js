@@ -373,6 +373,13 @@ window.WZ = window.WZ || {};
       btn.dataset.action = b.action;
       box.appendChild(btn);
     });
+    /* 空 ban：禁用阶段可以不下手。按钮在步骤提示条上（常驻可见），
+       不需要先选英雄 —— 所以它不放在「选中英雄后才有」的侧栏里。 */
+    var empty = util.el('button', 'btn btn-ghost act-empty-ban', '空 BAN（跳过这次禁用）');
+    empty.type = 'button';
+    empty.id = 'actEmptyBanPanel';
+    empty.dataset.emptyBan = '1';
+    box.appendChild(empty);
     var hint = util.el('button', 'btn btn-ghost wide', '取消选中');
     hint.type = 'button';
     hint.id = 'actCancel';
@@ -400,6 +407,12 @@ window.WZ = window.WZ || {};
       selectedId = null;
       renderPanel();
       util.$$('.hero-card', dom.grid).forEach(function (c) { c.classList.remove('selected'); });
+      return;
+    }
+    if (target.dataset.emptyBan) {
+      /* 空 ban 不需要先选英雄，所以要在「必须有 hero」的判断之前处理 */
+      var side = emptyBanSide();
+      if (side && WZ.app && WZ.app.onEmptyBan) WZ.app.onEmptyBan(side);
       return;
     }
     if (target.dataset.action) {
@@ -443,9 +456,34 @@ window.WZ = window.WZ || {};
     host.insertBefore(note, grid);
   }
 
+  /* 当前该由哪一方禁用 —— 空 ban 按钮要知道替谁空 ban。
+     巅峰赛的 both 步里按蓝方优先（实际双方都能空，先到先得）。 */
+  function emptyBanSide() {
+    var st = WZ.draft.state();
+    if (!st || !st.stepInfo || st.stepInfo.action !== 'ban') return null;
+    if (st.stepInfo.side === 'both') return 'blue';
+    return st.stepInfo.side;
+  }
+  ui.emptyBanSide = emptyBanSide;
+
   /* 根据当前 BP 步骤刷新按钮可用状态 */
   function syncActions() {
     if (!dom.panel) return;
+
+    /* 空 BAN 按钮：禁用阶段且轮得到时才可用。
+       步骤提示条上那个（#actEmptyBan）是常驻的；侧栏里那个（#actEmptyBanPanel）
+       只在选中英雄后才存在，两个都要同步。 */
+    var emptyBtns = [document.getElementById('actEmptyBan'),
+      document.getElementById('actEmptyBanPanel')];
+    var canEmpty = !lock.on && !!WZ.draft.canEmptyBan(emptyBanSide());
+    emptyBtns.forEach(function (b) {
+      if (!b) return;
+      b.disabled = !canEmpty;
+      b.title = canEmpty
+        ? '本步不下 ban（空 ban），直接轮到下一位'
+        : (lock.on ? (lock.reason || '等待管理员开始 BP') : '现在是选择阶段 / 没轮到禁用，不能空 ban');
+    });
+
     var btns = util.$$('.pv-actions button[data-action]', dom.panel);
     if (!btns.length) return;
     var hero = util.heroById(selectedId);

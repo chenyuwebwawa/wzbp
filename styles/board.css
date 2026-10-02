@@ -134,6 +134,34 @@ body.boss .stage { padding: 0; height: 100vh; }
 .ban-slot .bs-cross::after  { transform: rotate(-45deg); }
 .ban-slot.was-empty .bs-cross { display: none; }
 
+/* 空 ban：占了这个位但没 ban 英雄 —— 用虚线框 + 「空BAN」留痕，
+   和「还没轮到的空位」在观感上明确区分开 */
+.ban-slot.is-empty-ban {
+  border-style: dashed;
+  border-color: #4a5a78;
+  background: rgba(255, 255, 255, .03);
+}
+.ban-slot.is-empty-ban .bs-cross { display: none; }
+.ban-slot.is-empty-ban .bs-empty { display: none; }
+.ban-slot.is-empty-ban .bs-name {
+  color: #7e90ad;
+  letter-spacing: 2px;
+  font-weight: 700;
+  background: none;
+  bottom: auto;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 0;
+  font-size: 13px;
+}
+.ban-slot.is-empty-ban.just-placed {
+  animation: emptyBanPop .5s ease-out;
+}
+@keyframes emptyBanPop {
+  0%   { box-shadow: 0 0 0 0 rgba(255, 201, 102, .55); border-color: var(--gold); }
+  100% { box-shadow: 0 0 0 12px rgba(255, 201, 102, 0); border-color: #4a5a78; }
+}
+
 .ban-slot .bs-name {
   position: absolute;
   left: 0; right: 0; bottom: 0;

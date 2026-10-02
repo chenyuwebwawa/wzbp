@@ -258,6 +258,71 @@ section('全局 BP（每队 5 ban + 5 pick，20 手：先 ban2 后 ban3）');
   eq(s.global, true, '标记为全局 BP 赛制');
 }
 
+section('空 ban：禁用阶段可以不下手');
+{
+  D.init('kpl');
+  const pool0 = D.state().pool.length;
+
+  eq(D.canEmptyBan('blue'), true, '第一手禁用阶段可以空 ban');
+  const r1 = D.apply('blue', 'ban', 0);
+  eq(r1.ok, true, '蓝方空 ban 成功');
+  eq(D.state().bans.blue, [0], 'ban 位记录为哨兵值 0');
+  eq(D.state().pool.length, pool0, '空 ban 不消耗英雄（可选池不变）');
+  eq(D.state().progress, 1, '空 ban 照样推进一手');
+
+  const r2 = D.apply('red', 'ban', 0);
+  eq(r2.ok, true, '红方也能空 ban');
+  eq(D.state().bans.red, [0], '红方 ban 位也记 0');
+
+  /* 空 ban 之后正常 ban 仍然可用 */
+  const r3 = D.apply('blue', 'ban', 105);
+  eq(r3.ok, true, '空 ban 之后正常 ban 仍可用');
+  eq(D.state().bans.blue, [0, 105], '两种 ban 混在一起也正确');
+
+  /* 空 ban 不是「选了个英雄 0」：105 已被真 ban，重复 ban 要被拒 */
+  const dup = D.apply('red', 'ban', 105);
+  eq(dup.ok, false, '被真 ban 过的英雄不能再 ban');
+
+  /* 到了 pick 阶段就不能空了 */
+  D.apply('red', 'ban', 106);          // 补掉红方第二个 ban
+  eq(D.state().stepInfo.action, 'pick', '进入选择阶段');
+  eq(D.canEmptyBan('blue'), false, '选择阶段不能空 ban');
+  const rp = D.apply('blue', 'pick', 0);
+  eq(rp.ok, false, '选人传 0 被拒');
+  const rn = D.apply('blue', 'pick', null);
+  eq(rn.ok, false, '选人传 null 被拒');
+  const ru = D.apply('blue', 'pick', undefined);
+  eq(ru.ok, false, '选人什么都不传也被拒');
+  eq(D.state().picks.blue.length, 0, '被拒的选人没有污染盘面');
+
+  /* 正常选人不受影响 */
+  const okPick = D.apply('blue', 'pick', 110);
+  eq(okPick.ok, true, '正常选人仍然可用');
+
+  /* 导出 / 导入往返：空 ban 必须能原样还原 */
+  D.init('kpl');
+  D.apply('blue', 'ban', 0);
+  D.apply('red', 'ban', 0);
+  const dump = D.exportData();
+  eq(dump.actions[0].id, 0, '导出数据里空 ban 的 id 是 0');
+  D.init('kpl');
+  const imp = D.importData(dump);
+  eq(imp.ok, true, '带空 ban 的导出数据能导入');
+  eq(D.state().bans.blue, [0], '导入后空 ban 位还原');
+  eq(D.state().bans.red, [0], '导入后红方空 ban 位还原');
+
+  /* 分享码也要能带空 ban */
+  D.init('kpl');
+  D.apply('blue', 'ban', 0);
+  D.apply('red', 'ban', 105);
+  const code = D.shareCode();
+  D.init('kpl');
+  const sc = D.applyShareCode(code);
+  eq(sc.ok, true, '带空 ban 的分享码能解析');
+  eq(D.state().bans.blue, [0], '分享码还原出空 ban');
+  eq(D.state().bans.red, [105], '分享码还原出正常 ban');
+}
+
 section('赛制顺序与服务端镜像逐项一致（防止两边漂移）');
 {
   /* 服务端在 server/draft.js 里镜像了一份顺序，两边不一致会导致整局都对不上。

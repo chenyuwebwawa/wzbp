@@ -425,6 +425,17 @@ window.WZ = window.WZ || {};
     document.getElementById('btnRedo').addEventListener('click', doRedo);
     document.getElementById('btnReset').addEventListener('click', doReset);
 
+    /* 步骤提示条上的「空 BAN」按钮。
+       它不在侧栏里，所以不走 ui 的 onPanelClick，要在这里单独绑。 */
+    var btnEmpty = document.getElementById('actEmptyBan');
+    if (btnEmpty) {
+      btnEmpty.addEventListener('click', function () {
+        var side = WZ.ui.emptyBanSide ? WZ.ui.emptyBanSide() : null;
+        if (!side) { toast('现在是选择阶段，不能空 ban', 'warn'); return; }
+        app.onEmptyBan(side);
+      });
+    }
+
     document.getElementById('btnTimer30').addEventListener('click', function () { setTimer(30); startTimer(); });
     document.getElementById('btnTimer60').addEventListener('click', function () { setTimer(60); startTimer(); });
     document.getElementById('btnTimerStart').addEventListener('click', toggleTimer);
@@ -495,6 +506,30 @@ window.WZ = window.WZ || {};
   /* ------------------------------------------------------------
      BP 动作
      ------------------------------------------------------------ */
+
+  /* 空 ban：禁用阶段跳过这一次禁用（不消耗英雄）。
+     联网时同样交给服务端，等 SSE 回来再重建盘面。 */
+  app.onEmptyBan = function (side) {
+    if (online.active && online.code && !online.launched) {
+      toast('还没开始 BP —— 等管理员点「开始 BP」', 'warn', 3600);
+      return;
+    }
+    if (online.active && online.code && WZ.roomUI && typeof WZ.roomUI.sendAction === 'function') {
+      WZ.roomUI.sendAction(side, 'ban', 0).catch(function (err) {
+        toast((err && err.message) || '空 ban 失败', 'err');
+      });
+      return;
+    }
+    var res = draft.apply(side, 'ban', 0);
+    if (!res.ok) { toast(res.reason, 'err'); return; }
+    manualFocus = null;
+    var st = draft.state();
+    WZ.board.markPlaced('ban', side, st.bans[side].length - 1);
+    if (!timer.running && timer.total > 0) startTimer();
+    saveLocalDraft();
+    toast('已空 ban（本步不下 ban）', 'ok', 2200);
+  };
+
   app.onAction = function (side, action, hero) {
     if (!hero) return;
 

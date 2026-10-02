@@ -962,6 +962,87 @@ async function runSuite() {
     gpEnd.json.game.globalUsed.blue.length >= 5 && gpEnd.json.game.globalUsed.red.length >= 5,
     'blue=' + gpEnd.json.game.globalUsed.blue.length + ' red=' + gpEnd.json.game.globalUsed.red.length);
 
+  /* ---------- 18b. 空 ban ---------- */
+  group('18b. 空 ban（禁用阶段可以不下手）');
+  {
+    const P1e = 'eb-p1-' + Date.now();
+    const P2e = 'eb-p2-' + Date.now();
+    const cr = await api('POST', '/api/rooms', {
+      name: '空ban自检', mode: 'kpl', seriesCount: 1, turnSeconds: 60,
+      adminUser: 'ebcoach', adminPass: 'secret123', playerKey: P1e, nickname: '甲'
+    });
+    checkEq('空ban 建房 HTTP 200', cr.status, 200);
+    const ebCode = cr.json.room.code;
+    const ebTok = cr.json.adminToken;
+    await api('POST', '/api/rooms/' + ebCode + '/join', { nickname: '乙', team: 'red', playerKey: P2e });
+
+    const pre = await api('POST', '/api/rooms/' + ebCode + '/action',
+      { playerKey: P1e, side: 'blue', action: 'ban', heroId: 0 });
+    checkEq('未开局时空 ban 也被拒（ERR_NOT_LAUNCHED）', pre.json && pre.json.code, 'ERR_NOT_LAUNCHED');
+
+    await api('POST', '/api/rooms/' + ebCode + '/launch', { adminToken: ebTok });
+
+    const z1 = await api('POST', '/api/rooms/' + ebCode + '/action',
+      { playerKey: P1e, side: 'blue', action: 'ban', heroId: 0 });
+    checkEq('蓝方空 ban HTTP 200', z1.status, 200);
+    checkEq('空 ban 落库 heroId=0', z1.json && z1.json.action && z1.json.action.heroId, 0);
+    checkEq('空 ban 落库 heroName=空BAN', z1.json && z1.json.action && z1.json.action.heroName, '空BAN');
+
+    const z2 = await api('POST', '/api/rooms/' + ebCode + '/action',
+      { playerKey: P2e, side: 'red', action: 'ban', heroId: 0 });
+    checkEq('红方空 ban 也成功', z2.status, 200);
+
+    const z3 = await api('POST', '/api/rooms/' + ebCode + '/action',
+      { playerKey: P1e, side: 'blue', action: 'ban', heroId: 105 });
+    checkEq('空 ban 之后正常 ban 仍可用', z3.status, 200);
+
+    const z4 = await api('POST', '/api/rooms/' + ebCode + '/action',
+      { playerKey: P2e, side: 'red', action: 'ban', heroId: 105 });
+    checkEq('空 ban 没占掉英雄：真 ban 过的仍会被拒', z4.json && z4.json.code, 'ERR_HERO_TAKEN');
+
+    const zst = await api('GET', '/api/rooms/' + ebCode + '/state?playerKey=' + P1e);
+    checkEq('bans 数组里保留了空 ban（0）',
+      JSON.stringify(zst.json.game.bans.blue) + '|' + JSON.stringify(zst.json.game.bans.red), '[0,105]|[0]');
+    checkEq('空 ban 不进全局池',
+      zst.json.game.globalUsed.blue.length + '/' + zst.json.game.globalUsed.red.length, '0/0');
+
+    /* 补掉红方第二个 ban 进入选择阶段 */
+    await api('POST', '/api/rooms/' + ebCode + '/action',
+      { playerKey: P2e, side: 'red', action: 'ban', heroId: 106 });
+    const pst = await api('GET', '/api/rooms/' + ebCode + '/state?playerKey=' + P1e);
+    checkEq('已进入选择阶段', pst.json.game.nextAction && pst.json.game.nextAction.action, 'pick');
+
+    const zp = await api('POST', '/api/rooms/' + ebCode + '/action',
+      { playerKey: P1e, side: 'blue', action: 'pick', heroId: 0 });
+    checkEq('选人传 0 被拒（ERR_BAD_PARAM）', zp.json && zp.json.code, 'ERR_BAD_PARAM');
+    const zn = await api('POST', '/api/rooms/' + ebCode + '/action',
+      { playerKey: P1e, side: 'blue', action: 'pick', heroId: -5 });
+    checkEq('选人传负数被拒', zn.status, 400);
+    const zb = await api('POST', '/api/rooms/' + ebCode + '/action',
+      { playerKey: P2e, side: 'red', action: 'ban', heroId: -5 });
+    checkEq('禁用阶段传负数也被拒（只有 0 算空 ban）', zb.status, 400);
+
+    const zok = await api('POST', '/api/rooms/' + ebCode + '/action',
+      { playerKey: P1e, side: 'blue', action: 'pick', heroId: 110 });
+    checkEq('正常选人不受影响', zok.status, 200);
+
+    const zrep = await api('GET', '/api/games/' + pst.json.game.id + '/replay');
+    const zacts = (zrep.json && zrep.json.actions) || [];
+    const blanks = zacts.filter(function (a) { return a.heroId === 0; });
+    check('回放里两条空 ban 都在', blanks.length === 2, JSON.stringify(blanks));
+    check('回放里空 ban 的 heroName 是 空BAN',
+      blanks.length === 2 && blanks.every(function (a) { return a.heroName === '空BAN'; }),
+      JSON.stringify(blanks.map(function (a) { return a.heroName; })));
+    check('回放 gapMs 仍是非负整数',
+      zacts.every(function (a) { return Number.isInteger(a.gapMs) && a.gapMs >= 0; }),
+      JSON.stringify(zacts.map(function (a) { return a.gapMs; })));
+
+    const zhist = await api('GET', '/api/rooms/' + ebCode + '/history?playerKey=' + P1e);
+    const zg = zhist.json && zhist.json.games && zhist.json.games[0];
+    check('历史卡片 bans 里保留空 ban',
+      !!zg && JSON.stringify(zg.bans.blue) === '[0,105]', zg ? JSON.stringify(zg.bans) : 'no game');
+  }
+
   /* ---------- 19. 静态文件 ---------- */
   group('19. 静态文件与安全');
   const home = await request('GET', '/');

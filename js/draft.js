@@ -414,6 +414,28 @@ window.WZ = window.WZ || {};
     return activeSteps(modeById(st.mode))[st.step].s === 'both';
   };
 
+  /* 空 ban 的哨兵值。
+     真实英雄 id 都 > 0，所以 0 不会被误认；JSON / 分享码 / 数据库都能原样承载。
+     空 ban 只占一个 ban 位，不消耗英雄、也不进全局池。 */
+  var EMPTY_BAN = 0;
+  api.EMPTY_BAN = EMPTY_BAN;
+  api.isEmptyBan = function (id) { return Number(id) === EMPTY_BAN; };
+
+  /* 某个英雄 id 算不算「没给」——空 ban 与非法 id 都归到这里 */
+  function noHero(id) {
+    return id === null || id === undefined || id === '' || Number(id) === 0 || isNaN(Number(id));
+  }
+
+  /* 当前这一步能不能空 ban（只有禁用阶段可以；选人必须真选一个） */
+  api.canEmptyBan = function (side) {
+    if (!st || st.done) return false;
+    var cur = activeSteps(modeById(st.mode))[st.step];
+    if (!cur || cur.a !== 'ban') return false;
+    if (cur.s !== 'both' && side && cur.s !== side) return false;
+    var usedSide = cur.s === 'both' ? (side || 'blue') : cur.s;
+    return st.bans[usedSide].length < st.cap[usedSide].ban;
+  };
+
   /* 校验并执行一步。失败返回 {ok:false, reason} */
   api.apply = function (side, action, heroId) {
     if (st.done) return { ok: false, reason: '本轮 BP 已结束' };
@@ -438,15 +460,25 @@ window.WZ = window.WZ || {};
       return { ok: false, reason: (side === 'blue' ? '蓝方' : '红方') + '的' +
         (cur.a === 'ban' ? '禁用' : '选择') + '位已满（' + cap + ' 个）' };
     }
-    if (!WZ.util.heroById(heroId)) return { ok: false, reason: '英雄不存在' };
-    if (taken(heroId)) {
-      var h = WZ.util.heroById(heroId);
-      return { ok: false, reason: (h ? h.name : '该英雄') + ' 已被 ban/pick' };
+    /* 空 ban：禁用阶段允许不下手（俗称空 ban）。
+       只占一个 ban 位，不消耗英雄、不校验英雄是否存在、也不进全局池。
+       选人阶段不给英雄仍然按错误处理 —— 选人必须真选一个。 */
+    var emptyBan = noHero(heroId) && action === 'ban';
+    if (emptyBan && !api.canEmptyBan(side)) {
+      return { ok: false, reason: '当前不是禁用阶段，不能空 ban' };
+    }
+    if (!emptyBan) {
+      if (noHero(heroId)) return { ok: false, reason: '请选择一个英雄' };
+      if (!WZ.util.heroById(heroId)) return { ok: false, reason: '英雄不存在' };
+      if (taken(heroId)) {
+        var h = WZ.util.heroById(heroId);
+        return { ok: false, reason: (h ? h.name : '该英雄') + ' 已被 ban/pick' };
+      }
     }
     /* 全局 BP：本方在之前小局选过的英雄，本方不能再选（对方不受影响）；
        禁用不受全局池限制。 */
     var globalOn = !!modeById(st.mode).global || !!orderOverrideGlobal;
-    if (globalOn && action === 'pick' && blockedByGlobal(side, heroId)) {
+    if (!emptyBan && globalOn && action === 'pick' && blockedByGlobal(side, heroId)) {
       var hg = WZ.util.heroById(heroId);
       return {
         ok: false,
@@ -454,13 +486,14 @@ window.WZ = window.WZ || {};
       };
     }
 
-    if (action === 'ban') st.bans[side].push(heroId);
-    else st.picks[side].push(heroId);
+    var recordId = emptyBan ? EMPTY_BAN : heroId;
+    if (action === 'ban') st.bans[side].push(recordId);
+    else st.picks[side].push(recordId);
 
     /* 记录到执行流水：这是导出与跨窗口同步的唯一权威来源。
        不能靠「按动作类型流水线取下标」还原——巅峰赛 ban 阶段里
        同一侧会连出 3 手，且中途导出时轮次可能不满。 */
-    st.applied.push({ step: st.step, s: side, a: action, id: heroId });
+    st.applied.push({ step: st.step, s: side, a: action, id: recordId, empty: emptyBan || undefined });
     st.stepSides.push(side);
     st.stepDone.push(side);
 

@@ -242,14 +242,36 @@ window.WZ = window.WZ || {};
 
   function heroOf(id) { return util.heroById(id); }
 
+  /* 空 ban：占了这个 ban 位，但没 ban 任何英雄 */
+  function isEmptyBan(id) {
+    return WZ.draft && typeof WZ.draft.isEmptyBan === 'function'
+      ? WZ.draft.isEmptyBan(id)
+      : Number(id) === 0;
+  }
+
   function fillBanSlot(slot, heroId, justPlaced) {
     var hero = heroOf(heroId);
     slot.style.display = '';
-    slot.classList.toggle('was-empty', !hero);
+    /* 空 ban 已经「用掉」了这个位，所以不算 was-empty：显示成「空BAN」留痕 */
+    var emptyBan = isEmptyBan(heroId);
+    slot.classList.toggle('was-empty', !hero && !emptyBan);
+    slot.classList.toggle('is-empty-ban', emptyBan);
     slot.classList.toggle('filled', !!hero);
     slot.classList.remove('just-placed');
     var img = slot.querySelector('img');
     var nameEl = slot.querySelector('.bs-name');
+    var emptyEl = slot.querySelector('.bs-empty');
+    if (emptyBan) {
+      if (img) img.remove();
+      if (emptyEl) emptyEl.textContent = '';
+      nameEl.textContent = '空BAN';
+      if (justPlaced) {
+        void slot.offsetWidth;
+        slot.classList.add('just-placed');
+      }
+      return;
+    }
+    if (emptyEl) emptyEl.textContent = 'BAN';
     if (hero) {
       if (!img) {
         img = document.createElement('img');

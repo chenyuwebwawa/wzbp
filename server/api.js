@@ -1068,7 +1068,15 @@ async function hAction(req, res, url, params) {
   if (act !== 'ban' && act !== 'pick') fail(400, 'ERR_BAD_PARAM', 'action 只能是 ban / pick');
 
   const heroId = numOr(body.heroId, NaN);
-  if (!Number.isInteger(heroId) || heroId <= 0) fail(400, 'ERR_BAD_PARAM', 'heroId 必须是正整数');
+  /* heroId = 0 是「空 ban」：禁用阶段可以不下手（只占一个 ban 位，不消耗英雄）。
+     选人阶段不允许空，这条在后面按 step.a 判定。 */
+  const isEmptyBan = heroId === 0;
+  if (!isEmptyBan && (!Number.isInteger(heroId) || heroId <= 0)) {
+    fail(400, 'ERR_BAD_PARAM', 'heroId 必须是正整数（禁用阶段可以传 0 表示空 ban）');
+  }
+  if (isEmptyBan && act !== 'ban') {
+    fail(400, 'ERR_BAD_PARAM', '只有禁用可以空 ban，选人必须指定英雄');
+  }
 
   /* 并发抢同一手时唯一键会冲突 → 重读状态再算一次（最多 3 次） */
   let created = null;
@@ -1112,19 +1120,22 @@ async function hAction(req, res, url, params) {
       fail(409, 'ERR_NOT_YOUR_TURN', sideName(side) + '的' + (act === 'ban' ? '禁用' : '选择') + '位已满');
     }
 
-    /* 4) 英雄必须存在（白名单提取失败时降级为不校验，契约 §7） */
-    if (!heroes.has(heroId)) fail(404, 'ERR_HERO_UNKNOWN', '英雄不存在（id ' + heroId + '）');
-    /* 3) 本局不能被 ban/pick 过两次 */
-    const taken = actions.some(function (a) { return Number(a.hero_id) === heroId; });
-    if (taken) fail(409, 'ERR_HERO_TAKEN', (heroes.nameOf(heroId) || ('英雄 ' + heroId)) + ' 已经被 ban/pick 过了');
+    /* 4) 英雄必须存在（白名单提取失败时降级为不校验，契约 §7）
+          空 ban 跳过英雄校验 —— 它本来就没有英雄 */
+    if (!isEmptyBan) {
+      if (!heroes.has(heroId)) fail(404, 'ERR_HERO_UNKNOWN', '英雄不存在（id ' + heroId + '）');
+      /* 3) 本局不能被 ban/pick 过两次 */
+      const taken = actions.some(function (a) { return Number(a.hero_id) === heroId; });
+      if (taken) fail(409, 'ERR_HERO_TAKEN', (heroes.nameOf(heroId) || ('英雄 ' + heroId)) + ' 已经被 ban/pick 过了');
 
-    /* 3b) 全局 BP（kpl）：本方在本系列赛选过的英雄，本方后续小局不能再选。
-           对方选过的不影响；禁用不进池（池子只由 action='pick' 组成）。 */
-    if (act === 'pick' && draft.isGlobal(series.mode)) {
-      const used = await globalUsedOf(room.id);
-      if (used[side].indexOf(heroId) !== -1) {
-        fail(409, 'ERR_HERO_GLOBAL_USED',
-          '该英雄已被' + sideName(side) + '在之前的小局选用（全局 BP）');
+      /* 3b) 全局 BP（kpl）：本方在本系列赛选过的英雄，本方后续小局不能再选。
+             对方选过的不影响；禁用不进池（池子只由 action='pick' 组成）。 */
+      if (act === 'pick' && draft.isGlobal(series.mode)) {
+        const used = await globalUsedOf(room.id);
+        if (used[side].indexOf(heroId) !== -1) {
+          fail(409, 'ERR_HERO_GLOBAL_USED',
+            '该英雄已被' + sideName(side) + '在之前的小局选用（全局 BP）');
+        }
       }
     }
 
@@ -1136,7 +1147,7 @@ async function hAction(req, res, url, params) {
     if (gapMs > 2147483647) gapMs = 2147483647;
 
     const seq = actions.length + 1;
-    const heroName = heroes.nameOf(heroId) || ('英雄' + heroId);
+    const heroName = isEmptyBan ? '空BAN' : (heroes.nameOf(heroId) || ('英雄' + heroId));
     try {
       const r = await db.query(SQL.actionInsert, [
         series.id, seq, pos.stepIndex, side, act, heroId, heroName,
