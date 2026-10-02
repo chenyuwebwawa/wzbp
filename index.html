@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>王者荣耀 BP 展示台 · 征召 / KPL 全局 BP</title>
+<link rel="stylesheet" href="styles/main.css">
+<link rel="stylesheet" href="styles/board.css">
+<link rel="stylesheet" href="styles/overlay.css">
+</head>
+<body>
+
+<!-- 展示窗顶部标记条（只在 ?wzrole=display 时出现；占用很小，可裁掉） -->
+<div class="display-flag" id="displayFlag">
+  <span>🖥 展示窗 — 用 OBS「窗口采集」采集这个窗口</span>
+  <b id="displaySync">等待控制窗…</b>
+  <button type="button" id="btnDisplayFit">重新适配</button>
+</div>
+
+<!-- ================= 顶栏 ================= -->
+<header class="appbar">
+  <div class="appbar-left">
+    <div class="brand">
+      <span class="brand-mark">BP</span>
+      <span class="brand-text">
+        <strong>王者荣耀 BP 展示台</strong>
+        <small id="dataStatus">英雄数据加载中…</small>
+      </span>
+    </div>
+  </div>
+
+  <div class="appbar-center">
+    <div class="seg" id="modeSwitch" role="tablist" aria-label="赛制"></div>
+  </div>
+
+  <div class="appbar-right">
+    <button class="btn btn-ghost" id="btnExportJson" type="button">导出 JSON</button>
+    <button class="btn btn-ghost" id="btnImportJson" type="button">导入</button>
+    <button class="btn btn-ghost" id="btnScreenshot" type="button">截图</button>
+    <button class="btn btn-ghost" id="btnShare" type="button">分享码</button>
+    <button class="btn btn-ghost" id="btnStoryPanel" type="button"
+            title="填写 MVP 战绩 / 赛前数据，并打开独立采集窗">赛事面板</button>
+    <button class="btn btn-primary" id="btnOpenDisplay" type="button"
+            title="把展示板拆到独立窗口给 OBS 采集，本窗口继续操作 BP">打开展示窗</button>
+    <button class="btn btn-ghost" id="btnBossMode" type="button">直播模式</button>
+  </div>
+</header>
+
+<!-- 导入文件用的隐藏 input -->
+<input type="file" id="importFile" accept="application/json,.json" hidden>
+
+<!-- ================= 控制台 ================= -->
+<section class="console" id="console">
+  <div class="console-top">
+    <div class="ctl-group">
+      <button class="btn btn-warn" id="btnUndo" type="button" title="撤销上一步（Ctrl+Z）">↶ 撤销</button>
+      <button class="btn btn-warn" id="btnRedo" type="button" title="重做（Ctrl+Y）">↷ 重做</button>
+      <button class="btn btn-danger" id="btnReset" type="button" title="清空重开">⟲ 重开</button>
+      <span class="fixme" id="stepHint">准备开始</span>
+    </div>
+
+    <div class="ctl-group ctl-timer">
+      <span class="timer-label">倒计时</span>
+      <span class="timer" id="clock">00:00</span>
+      <button class="btn btn-ghost" id="btnTimer30" type="button">30s</button>
+      <button class="btn btn-ghost" id="btnTimer60" type="button">60s</button>
+      <button class="btn btn-ghost" id="btnTimerStart" type="button">开始</button>
+      <button class="btn btn-ghost" id="btnTimerReset" type="button">归零</button>
+    </div>
+  </div>
+
+  <div class="console-search">
+    <span class="search-icon" aria-hidden="true">🔍</span>
+    <input type="text" id="searchInput" class="search-input" autocomplete="off" spellcheck="false"
+           placeholder="搜索英雄：中文名 / 全拼 / 首字母（如 廉颇、lianpo、lp）">
+    <button class="search-clear" id="searchClear" type="button" title="清空">×</button>
+  </div>
+
+  <div class="role-filter" id="roleFilter"></div>
+
+  <div class="console-body">
+    <div class="grid-wrap">
+      <div class="hero-grid" id="heroGrid"></div>
+      <div class="grid-empty" id="gridEmpty" hidden></div>
+    </div>
+
+    <aside class="side-panel" id="sidePanel">
+      <div class="sel-empty">点击左侧英雄查看原画与技能</div>
+    </aside>
+  </div>
+</section>
+
+<!-- ================= 展示板（OBS 窗口采集这一块） ================= -->
+<div class="stage" id="stage">
+  <div class="board-frame" id="boardFrame">
+  <div class="board" id="board">
+    <div class="board-scanline" aria-hidden="true"></div>
+
+    <!-- 顶栏：蓝 ban / 标题 / 红 ban -->
+    <header class="board-head">
+      <div class="ban-lane ban-lane-blue" id="banLaneBlue"></div>
+
+      <div class="board-title">
+        <div class="board-kicker">HONOR OF KINGS · DRAFT PICK</div>
+        <h1 class="board-mode" id="boardMode">排位征召</h1>
+        <div class="board-phase">
+          <span class="phase-dot" id="phaseDot"></span>
+          <span id="boardPhase">等待开始</span>
+        </div>
+        <div class="board-timer" id="boardClock">00:00</div>
+      </div>
+
+      <div class="ban-lane ban-lane-red" id="banLaneRed"></div>
+    </header>
+
+    <!-- 主体：蓝方五人选 / 中央英雄名牌 / 红方五选 -->
+    <main class="board-body">
+      <div class="team-col team-blue" id="pickLaneBlue"></div>
+
+      <div class="hero-stage" id="heroStage">
+        <div class="badge badge-slot" id="stageSlot">未开始</div>
+        <img class="splash" id="stageSplash" alt="">
+        <div class="splash-fallback" id="stageFallback">王</div>
+        <div class="hero-name-bar">
+          <div class="hero-name" id="stageName">—</div>
+          <div class="hero-title" id="stageTitle"></div>
+        </div>
+      </div>
+
+      <div class="team-col team-red" id="pickLaneRed"></div>
+    </main>
+
+    <div class="board-status" id="boardStatus"></div>
+  </div>
+  </div>
+</div>
+
+<!-- ================= 赛事面板抽屉（控制窗里编辑 MVP / 赛前数据） ================= -->
+<aside class="story-drawer" id="storyDrawer" hidden>
+  <div class="sd-head">
+    <span class="sd-title" id="sdTitle">MVP 数据面板</span>
+    <button class="btn btn-ghost" id="sdClose" type="button">关闭</button>
+  </div>
+  <div class="sd-tabs" id="sdTabs">
+    <button type="button" data-tab="mvp" class="on">MVP 卡</button>
+    <button type="button" data-tab="pre">赛前面板</button>
+  </div>
+  <div class="sd-body" id="sdBody"></div>
+</aside>
+
+<!-- ================= 赛事覆盖层（控制窗里隐藏；独立采集页 overlay.html 里才显示） ================= -->
+<div class="overlay" id="mvpOverlay">
+  <div class="ov-frame">
+    <div class="ov-scanline"></div>
+    <header class="mvp-head">
+      <div class="mvp-event" id="mvpEvent"></div>
+      <div class="mvp-sub">
+        <span id="mvpStageLabel"></span><span class="dot">·</span><span id="mvpGameNo"></span>
+      </div>
+      <div class="mvp-badge">
+        <span class="mb-mvp">MVP</span>
+        <span class="mb-en">MOST VALUABLE PLAYER</span>
+      </div>
+    </header>
+    <div class="mvp-body">
+      <div class="mvp-hero" id="mvpHeroStage">
+        <img class="mvp-art-img" id="mvpArt" alt="">
+        <div class="mvp-hero-grad"></div>
+        <div class="mvp-fallback">王</div>
+        <div class="mvp-hero-name"><span id="mvpHeroName"></span><small id="mvpHeroTitle"></small></div>
+      </div>
+      <div class="mvp-side">
+        <div class="mvp-player">
+          <div class="mp-avatar">MVP</div>
+          <div class="mp-text">
+            <div class="mp-id" id="mvpPlayerId"></div>
+            <div class="mp-real" id="mvpRealName"></div>
+            <div class="mp-tags">
+              <span class="mp-team" id="mvpTeam"></span>
+              <span class="mp-pos" id="mvpPosition"></span>
+            </div>
+          </div>
+        </div>
+        <div class="mvp-stats" id="mvpStats"></div>
+        <div class="mvp-song" id="mvpSong"></div>
+      </div>
+    </div>
+    <div class="overlay-empty console-only" id="mvpEmpty">还没有 MVP 数据 —— 在「赛事面板 → MVP」里填写</div>
+  </div>
+</div>
+
+<div class="overlay" id="preOverlay">
+  <div class="ov-frame">
+    <div class="ov-scanline"></div>
+    <header class="pre-head">
+      <div class="pre-event" id="preEvent"></div>
+      <div class="pre-match" id="preMatch"></div>
+      <div class="pre-sub"><span id="preStageLabel"></span><span class="pre-bo" id="preBestOf"></span></div>
+    </header>
+    <div class="pre-body">
+      <section class="pre-team is-blue" id="preBlue">
+        <div class="pt-head"><div class="team-name"></div><div class="team-meta"></div></div>
+        <div class="team-players"></div>
+      </section>
+      <div class="pre-center">
+        <div class="pre-vs">VS</div>
+        <div class="pre-h2h" id="preH2h">
+          <div class="h2h-title">近期交锋</div>
+          <div class="h2h-row">
+            <span class="h2h-blue" id="preH2hBlue"></span>
+            <span class="h2h-sep">:</span>
+            <span class="h2h-red" id="preH2hRed"></span>
+          </div>
+          <div class="h2h-note" id="preH2hNote"></div>
+        </div>
+      </div>
+      <section class="pre-team is-red" id="preRed">
+        <div class="pt-head"><div class="team-name"></div><div class="team-meta"></div></div>
+        <div class="team-players"></div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<!-- 提示条 -->
+<div class="toast" id="toast" hidden></div>
+
+<!-- 分享码弹窗 -->
+<div class="modal" id="shareModal" hidden>
+  <div class="modal-card">
+    <h3>分享码</h3>
+    <p class="modal-hint">复制后发给别人，或追加到网址 <code>index.html#bp=…</code> 后面即可还原这局 BP。</p>
+    <textarea id="shareText" readonly rows="4"></textarea>
+    <div class="modal-actions">
+      <button class="btn btn-primary" id="btnShareCopy" type="button">复制</button>
+      <button class="btn btn-ghost" id="btnShareClose" type="button">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 脚本 ================= -->
+<!-- 数据层：由 scripts/ 下的生成脚本从官网抓取生成，普通 script 直接加载 -->
+<script src="data/heroes.js"></script>
+<script src="data/skills.js"></script>
+
+<!-- 第三方：本地 vendored，离线可用（截图导出用；缺失时其余功能不受影响） -->
+<script src="vendor/html2canvas.min.js"></script>
+
+<!-- 逻辑层 -->
+<script src="js/utils.js"></script>
+<script src="js/sync.js"></script>
+<script src="js/net.js"></script>
+<script src="js/draft.js"></script>
+<script src="js/board.js"></script>
+<script src="js/export.js"></script>
+<script src="js/overlay.js"></script>
+<script src="js/story.js"></script>
+<script src="js/story-ui.js"></script>
+<script src="js/room-ui.js"></script>
+<script src="js/replay-ui.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>

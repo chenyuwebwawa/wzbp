@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>王者荣耀 BP 展示台 · 采集画面</title>
+<link rel="stylesheet" href="styles/main.css">
+<link rel="stylesheet" href="styles/board.css">
+<link rel="stylesheet" href="styles/overlay.css">
+</head>
+<body class="overlay-host">
+
+<!-- 采集页顶部提示条（OBS 里裁掉即可，或点「隐藏提示条」） -->
+<div class="display-flag" id="displayFlag">
+  <span>🖥 采集画面 — 在 OBS 里「窗口采集」这个窗口</span>
+  <b id="displaySync">等待控制窗…</b>
+  <button type="button" id="btnHideFlag">隐藏提示条</button>
+  <button type="button" id="btnDisplayFit">重新适配</button>
+</div>
+
+<!-- ================= MVP 卡 ================= -->
+<div class="overlay" id="mvpOverlay">
+  <div class="ov-frame">
+    <div class="ov-scanline"></div>
+
+    <header class="mvp-head">
+      <div class="mvp-event" id="mvpEvent"></div>
+      <div class="mvp-sub">
+        <span id="mvpStageLabel"></span>
+        <span class="dot">·</span>
+        <span id="mvpGameNo"></span>
+      </div>
+      <div class="mvp-badge">
+        <span class="mb-mvp">MVP</span>
+        <span class="mb-en">MOST VALUABLE PLAYER</span>
+      </div>
+    </header>
+
+    <div class="mvp-body">
+      <div class="mvp-hero" id="mvpHeroStage">
+        <img class="mvp-art-img" id="mvpArt" alt="">
+        <div class="mvp-hero-grad"></div>
+        <div class="mvp-fallback">王</div>
+        <div class="mvp-hero-name">
+          <span id="mvpHeroName"></span>
+          <small id="mvpHeroTitle"></small>
+        </div>
+      </div>
+
+      <div class="mvp-side">
+        <div class="mvp-player">
+          <div class="mp-avatar">MVP</div>
+          <div class="mp-text">
+            <div class="mp-id" id="mvpPlayerId"></div>
+            <div class="mp-real" id="mvpRealName"></div>
+            <div class="mp-tags">
+              <span class="mp-team" id="mvpTeam"></span>
+              <span class="mp-pos" id="mvpPosition"></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="mvp-stats" id="mvpStats"></div>
+
+        <div class="mvp-song" id="mvpSong"></div>
+      </div>
+    </div>
+
+    <!-- 只给自己看的空态提示：采集页里点「隐藏提示条」会一起隐藏 -->
+    <div class="overlay-empty console-only" id="mvpEmpty">
+      还没有 MVP 数据 —— 在控制窗的「赛事面板 → MVP」里填写
+    </div>
+  </div>
+</div>
+
+<!-- ================= 赛前面板 ================= -->
+<div class="overlay" id="preOverlay">
+  <div class="ov-frame">
+    <div class="ov-scanline"></div>
+
+    <header class="pre-head">
+      <div class="pre-event" id="preEvent"></div>
+      <div class="pre-match" id="preMatch"></div>
+      <div class="pre-sub">
+        <span id="preStageLabel"></span>
+        <span class="pre-bo" id="preBestOf"></span>
+      </div>
+    </header>
+
+    <div class="pre-body">
+      <section class="pre-team is-blue" id="preBlue">
+        <div class="pt-head">
+          <div class="team-name"></div>
+          <div class="team-meta"></div>
+        </div>
+        <div class="team-players"></div>
+      </section>
+
+      <div class="pre-center">
+        <div class="pre-vs">VS</div>
+        <div class="pre-h2h" id="preH2h">
+          <div class="h2h-title">近期交锋</div>
+          <div class="h2h-row">
+            <span class="h2h-blue" id="preH2hBlue"></span>
+            <span class="h2h-sep">:</span>
+            <span class="h2h-red" id="preH2hRed"></span>
+          </div>
+          <div class="h2h-note" id="preH2hNote"></div>
+        </div>
+      </div>
+
+      <section class="pre-team is-red" id="preRed">
+        <div class="pt-head">
+          <div class="team-name"></div>
+          <div class="team-meta"></div>
+        </div>
+        <div class="team-players"></div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<!-- ================= 脚本 ================= -->
+<script src="data/heroes.js"></script>
+<script src="data/skills.js"></script>
+<script src="js/utils.js"></script>
+<script src="js/sync.js"></script>
+<script src="js/draft.js"></script>
+<script src="js/overlay.js"></script>
+<script src="js/story.js"></script>
+<script src="js/overlay-page.js"></script>
+</body>
+</html>

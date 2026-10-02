@@ -1,0 +1,31 @@
+# 依赖
+node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# 运行时产物 / 临时文件
+_uicheck.html
+_smoke.html
+_diag.html
+_offline.html
+_probe.html
+_preview.html
+_shottest.html
+*.log
+.review/
+.recon/
+.wzbp-install-state
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 本地环境配置（不要把密码提交上来）
+.env
+.env.*
+!.env.example
+config.local.*

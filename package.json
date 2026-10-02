@@ -1,0 +1,20 @@
+{
+  "name": "wzbp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "王者荣耀 BP 展示台 —— 纯静态页 + Node/MySQL/SSE 联网版后端",
+  "type": "commonjs",
+  "main": "server/index.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node server/index.js",
+    "verify": "node scripts/verify-server.mjs",
+    "verify:memory": "node scripts/verify-server.mjs --memory"
+  },
+  "dependencies": {
+    "mysql2": "^3.11.5"
+  }
+}

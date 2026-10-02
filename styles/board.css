@@ -1,0 +1,513 @@
+/* ============================================================
+   wzbp · 展示板（OBS 窗口采集的这块区域）
+   作用域：#board 内部的一切，避免污染控制台样式
+   设计尺寸：1600 × 900（16:9），通过 --board-scale 整体缩放适配窗口
+   ============================================================ */
+
+.stage {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  padding: 18px 16px 26px;
+  overflow: hidden;
+}
+
+/* 直播模式下的降级提示（OBS 里直接看不见，留给自己看） */
+body.boss .stage { padding: 0; height: 100vh; }
+
+/* 缩放框：占位尺寸 = 设计尺寸 × 缩放比，内部 board 用 transform 等比缩放。
+   用 transform 而不是 zoom，保证布局尺寸可预测、截图与 OBS 观感一致。 */
+.board-frame {
+  position: relative;
+  flex: 0 0 auto;
+  width: calc(1600px * var(--board-scale, 1));
+  height: calc(900px * var(--board-scale, 1));
+}
+
+.board {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1600px;
+  height: 900px;
+  transform: scale(var(--board-scale, 1));
+  transform-origin: 0 0;
+  font-family: var(--font-cn);
+  color: #eaf1ff;
+  overflow: hidden;
+  border-radius: calc(16px * var(--board-scale, 1));
+  border: 1px solid #24314a;
+  background:
+    radial-gradient(120% 90% at 12% 0%, rgba(58, 160, 255, .16), transparent 55%),
+    radial-gradient(120% 90% at 88% 0%, rgba(255, 77, 94, .16), transparent 55%),
+    radial-gradient(80% 60% at 50% 115%, rgba(255, 201, 102, .07), transparent 60%),
+    linear-gradient(180deg, #0d1420 0%, #080c14 55%, #05070c 100%);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, .6), inset 0 0 0 1px rgba(255, 255, 255, .02);
+}
+
+/* 内部所有尺寸按 1600×900 设计稿写死，外层统一缩放 */
+
+.board-scanline {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    180deg, rgba(255, 255, 255, .022) 0 1px, transparent 1px 3px);
+  mix-blend-mode: overlay;
+}
+
+/* ================= 顶栏 ================= */
+
+.board-head {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 400px minmax(0, 1fr);
+  align-items: center;
+  gap: 18px;
+  padding: 16px 22px 10px;
+}
+
+.ban-lane {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+.ban-lane-blue { justify-content: flex-start; }
+.ban-lane-red { justify-content: flex-end; }
+
+.ban-slot {
+  position: relative;
+  /* KPL 单侧最多 5 个 ban 位：固定 76px 见方，两侧车道各 4 个间距 */
+  flex: 0 0 auto;
+  width: 76px;
+  height: 76px;
+  border-radius: 9px;
+  overflow: hidden;
+  border: 2px solid #2a3852;
+  background:
+    linear-gradient(160deg, #182234, #0d1420);
+  transition: border-color .2s, box-shadow .2s, filter .2s;
+}
+
+.ban-lane-blue .ban-slot { border-color: rgba(58, 160, 255, .45); }
+.ban-lane-red .ban-slot { border-color: rgba(255, 77, 94, .45); }
+
+.ban-slot img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  filter: grayscale(1) brightness(.62) contrast(1.05);
+}
+
+.ban-slot .bs-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-num);
+  font-size: 30px;
+  color: #22304a;
+}
+.ban-slot.filled .bs-empty { display: none; }
+
+.ban-slot .bs-cross {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.ban-slot .bs-cross::before,
+.ban-slot .bs-cross::after {
+  content: '';
+  position: absolute;
+  left: 8%; right: 8%;
+  top: 50%;
+  height: 4px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, transparent, #ff3b4e 18%, #ff3b4e 82%, transparent);
+  box-shadow: 0 0 10px rgba(255, 59, 78, .85);
+}
+.ban-slot .bs-cross::before { transform: rotate(45deg); }
+.ban-slot .bs-cross::after  { transform: rotate(-45deg); }
+.ban-slot.was-empty .bs-cross { display: none; }
+
+.ban-slot .bs-name {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  padding: 12px 2px 3px;
+  text-align: center;
+  font-size: 12px;
+  color: #dbe6f7;
+  background: linear-gradient(180deg, transparent, rgba(0, 0, 0, .88));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 当前步骤的 ban 位高亮呼吸 */
+.ban-slot.active {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 3px rgba(255, 201, 102, .18), 0 0 22px rgba(255, 201, 102, .35);
+  animation: slotBreath 1.5s ease-in-out infinite;
+}
+@keyframes slotBreath {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(255, 201, 102, .12); }
+  50%      { box-shadow: 0 0 0 5px rgba(255, 201, 102, .26), 0 0 26px rgba(255, 201, 102, .4); }
+}
+
+/* 刚落位的 ban 闪一下 */
+.ban-slot.just-placed { animation: banPop .5s ease-out; }
+@keyframes banPop {
+  0%   { transform: scale(1.14); filter: brightness(2.4); }
+  100% { transform: scale(1); filter: brightness(1); }
+}
+
+/* ================= 中央标题 ================= */
+
+.board-title {
+  text-align: center;
+  min-width: 0;
+}
+
+.board-kicker {
+  font-family: var(--font-num);
+  font-size: 12px;
+  letter-spacing: 4px;
+  color: #5c7396;
+  text-transform: uppercase;
+}
+
+.board-mode {
+  margin: 2px 0 6px;
+  font-size: 34px;
+  font-weight: 800;
+  letter-spacing: 6px;
+  background: linear-gradient(180deg, #ffffff, #b9cdf0 55%, #7f9cc9);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  text-shadow: 0 6px 26px rgba(120, 180, 255, .25);
+  white-space: nowrap;
+}
+
+.board-phase {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 16px;
+  border-radius: 20px;
+  background: rgba(15, 22, 36, .9);
+  border: 1px solid #2b3a56;
+  font-size: 14px;
+  letter-spacing: 1px;
+  color: #cfe0f8;
+  max-width: 100%;
+}
+
+.phase-dot {
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  background: #4b5f80;
+  box-shadow: 0 0 0 0 rgba(255, 255, 255, 0);
+  flex: 0 0 auto;
+}
+.phase-dot.blue { background: var(--blue); box-shadow: 0 0 12px var(--blue); animation: dotPulse 1.4s infinite; }
+.phase-dot.red  { background: var(--red);  box-shadow: 0 0 12px var(--red);  animation: dotPulse 1.4s infinite; }
+.phase-dot.gold { background: var(--gold); box-shadow: 0 0 12px var(--gold); animation: dotPulse 1.4s infinite; }
+@keyframes dotPulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: .35; }
+}
+
+.board-timer {
+  margin-top: 7px;
+  font-family: var(--font-num);
+  font-size: 30px;
+  letter-spacing: 3px;
+  color: #8fa8cc;
+  transition: color .2s;
+}
+.board-timer.warn { color: var(--gold); }
+.board-timer.danger { color: var(--red); text-shadow: 0 0 18px rgba(255, 77, 94, .6); }
+.board-timer.idle { color: #3d4c66; }
+
+/* ================= 主体三栏 ================= */
+
+.board-body {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 560px minmax(0, 1fr);
+  gap: 14px;
+  padding: 4px 22px 0;
+  /* 顶栏为了容纳 KPL 的 5 个 ban 位变高了，这里相应压缩，
+     保证「顶栏 + 主体 + 底部状态条」正好落在 900px 设计稿内 */
+  height: 628px;
+}
+
+.team-col {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+
+.team-col::before {
+  content: attr(data-label);
+  font-family: var(--font-num);
+  font-size: 11px;
+  letter-spacing: 3px;
+  color: #4e6386;
+  padding-left: 2px;
+}
+.team-red::before { text-align: right; padding-right: 2px; }
+
+/* 单个 pick 卡：右侧原画 + 左侧信息 */
+.pick-slot {
+  position: relative;
+  flex: 1 1 0;
+  min-height: 0;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 2px solid #22304a;
+  background: linear-gradient(100deg, #101827 0%, #0b1119 100%);
+  transition: border-color .2s, box-shadow .2s;
+}
+
+.pick-slot .ps-art {
+  position: absolute;
+  top: 0; bottom: 0;
+  right: 0;
+  width: 84%;
+  background-position: center 16%;
+  background-size: cover;
+  background-repeat: no-repeat;
+  opacity: 0;
+  transition: opacity .32s ease;
+  transform: scale(1.01);
+}
+.pick-slot.filled .ps-art { opacity: 1; }
+
+.pick-slot .ps-veil {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(95deg, rgba(9, 13, 21, .97) 0%, rgba(9, 13, 21, .78) 38%, rgba(9, 13, 21, .12) 72%, rgba(9, 13, 21, .3) 100%);
+}
+
+.pick-slot .ps-body {
+  position: absolute;
+  left: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  max-width: 78%;
+}
+
+.pick-slot .ps-name {
+  font-size: 21px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, .9);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pick-slot .ps-sub {
+  font-size: 11.5px;
+  color: #9db0cd;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pick-slot .ps-sub .sep { opacity: .4; margin: 0 5px; }
+
+.team-red .pick-slot { direction: rtl; }
+.team-red .pick-slot .ps-body { direction: ltr; left: auto; right: 14px; align-items: flex-end; text-align: right; }
+.team-red .pick-slot .ps-art { right: auto; left: 0; }
+.team-red .pick-slot .ps-veil {
+  background: linear-gradient(265deg, rgba(9, 13, 21, .97) 0%, rgba(9, 13, 21, .78) 38%, rgba(9, 13, 21, .12) 72%, rgba(9, 13, 21, .3) 100%);
+}
+
+/* 空位 */
+.pick-slot .ps-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-num);
+  font-size: 15px;
+  letter-spacing: 2px;
+  color: #2b3a56;
+}
+.pick-slot.filled .ps-empty { display: none; }
+
+.pick-slot.empty-blue { border-color: rgba(58, 160, 255, .22); }
+.pick-slot.empty-red  { border-color: rgba(255, 77, 94, .22); }
+
+/* 当前激活的 pick 位 */
+.pick-slot.active {
+  border-color: var(--gold);
+  animation: slotBreath 1.5s ease-in-out infinite;
+}
+.pick-slot.active::after {
+  content: '选择中…';
+  position: absolute;
+  right: 12px;
+  top: 10px;
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: var(--gold);
+  background: rgba(0, 0, 0, .55);
+  padding: 2px 9px;
+  border-radius: 20px;
+  border: 1px solid rgba(255, 201, 102, .4);
+}
+.team-red .pick-slot.active::after { right: auto; left: 12px; }
+
+.pick-slot.just-placed { animation: pickPop .6s ease-out; }
+@keyframes pickPop {
+  0%   { transform: scale(1.045); box-shadow: 0 0 0 6px rgba(255, 201, 102, .35); }
+  100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(255, 201, 102, 0); }
+}
+
+/* ================= 中央英雄大图 ================= */
+
+.hero-stage {
+  position: relative;
+  border-radius: 14px;
+  overflow: hidden;
+  background:
+    radial-gradient(80% 70% at 50% 30%, rgba(255, 201, 102, .10), transparent 65%),
+    linear-gradient(180deg, #0e1626, #070b12);
+  border: 1px solid #24314a;
+  box-shadow: inset 0 0 60px rgba(0, 0, 0, .6);
+}
+
+.hero-stage .splash {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* 官方原画是竖构图：往上取一点，让人物头肩落在画面中上部 */
+  object-position: center 22%;
+  opacity: 0;
+  transition: opacity .45s ease, transform 6s ease-out;
+}
+.hero-stage .splash.show { opacity: 1; transform: scale(1.06); }
+
+.splash-fallback {
+  position: absolute;
+  inset: 0;
+  display: none;
+  place-items: center;
+  font-family: var(--font-num);
+  font-size: 190px;
+  color: #16203a;
+}
+.hero-stage.no-art .splash-fallback { display: grid; }
+
+.hero-stage .badge-slot {
+  position: absolute;
+  left: 14px;
+  top: 12px;
+  z-index: 3;
+  font-family: var(--font-num);
+  font-size: 12.5px;
+  letter-spacing: 2px;
+  padding: 4px 13px;
+  border-radius: 20px;
+  background: rgba(6, 10, 18, .78);
+  border: 1px solid #2b3a56;
+  color: #b9cbe8;
+}
+.badge-slot.blue { border-color: rgba(58, 160, 255, .6); color: #a9d6ff; background: rgba(13, 77, 140, .45); }
+.badge-slot.red  { border-color: rgba(255, 77, 94, .6);  color: #ffc3ca; background: rgba(140, 20, 32, .45); }
+.badge-slot.gold { border-color: rgba(255, 201, 102, .6); color: #ffe1ae; background: rgba(90, 66, 18, .45); }
+
+.hero-stage .hero-name-bar {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  z-index: 2;
+  padding: 46px 18px 16px;
+  background: linear-gradient(180deg, transparent, rgba(5, 8, 14, .92) 65%);
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+.hero-stage .hero-name {
+  font-size: 40px;
+  font-weight: 800;
+  letter-spacing: 3px;
+  text-shadow: 0 3px 16px rgba(0, 0, 0, .9);
+  white-space: nowrap;
+}
+.hero-stage .hero-title {
+  font-size: 15px;
+  color: var(--gold);
+  opacity: .92;
+  letter-spacing: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 中央大图的四角装饰 */
+.hero-stage::before,
+.hero-stage::after {
+  content: '';
+  position: absolute;
+  width: 44px; height: 44px;
+  border: 2px solid rgba(255, 201, 102, .5);
+  z-index: 3;
+  pointer-events: none;
+}
+.hero-stage::before { left: 10px; top: 10px; border-right: 0; border-bottom: 0; border-radius: 10px 0 0 0; }
+.hero-stage::after  { right: 10px; bottom: 10px; border-left: 0; border-top: 0; border-radius: 0 0 10px 0; }
+
+/* ================= 底部状态条 ================= */
+
+.board-status {
+  position: absolute;
+  left: 22px;
+  right: 22px;
+  bottom: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  font-size: 12.5px;
+  color: #7f92b3;
+  border-top: 1px solid #1a2437;
+  padding-top: 9px;
+}
+.board-status .st-left { display: flex; align-items: center; gap: 10px; }
+.board-status .st-step {
+  font-family: var(--font-num);
+  letter-spacing: 1px;
+  color: #a9bcd8;
+}
+.board-status .st-right { display: flex; align-items: center; gap: 12px; }
+.board-status .st-tag {
+  padding: 2px 10px;
+  border-radius: 20px;
+  border: 1px solid #23314a;
+  background: rgba(12, 18, 30, .8);
+}
+.board-status .st-tag.blue { color: #a9d6ff; border-color: rgba(58, 160, 255, .4); }
+.board-status .st-tag.red  { color: #ffc3ca; border-color: rgba(255, 77, 94, .4); }
+
+/* 结束时的光晕 */
+.board.is-done { animation: doneGlow 2.6s ease-in-out infinite; }
+@keyframes doneGlow {
+  0%, 100% { box-shadow: 0 24px 70px rgba(0, 0, 0, .6); }
+  50%      { box-shadow: 0 24px 80px rgba(255, 201, 102, .28), 0 0 0 1px rgba(255, 201, 102, .35); }
+}
+
+/* 让截图/OBS 画面更干净：隐藏滚动条 */
+.board ::-webkit-scrollbar { display: none; }
