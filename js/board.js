@@ -68,23 +68,76 @@ window.WZ = window.WZ || {};
   };
 
   /* ------------------------------------------------------------
-     战队名
+     战队名 + 战队头像
      ------------------------------------------------------------
      直播时观众要知道「蓝方是哪支队」，所以队伍栏顶部有一条名字横条。
-     空名字时回退成「蓝方 / 红方」，不留一片空白。 */
+     空名字时回退成「蓝方 / 红方」，不留一片空白。
+     setTeams 收 { blue: {name, logo}, red: {name, logo} }；
+     setTeamNames 是只改名字的简化版（向后兼容）。 */
+  var teamLogos = { blue: '', red: '' };
+
+  board.setTeams = function (teams) {
+    teams = teams || {};
+    var changed = false;
+    [['blue', '蓝方'], ['red', '红方']].forEach(function (pair) {
+      var side = pair[0];
+      var t = teams[side] || {};
+      var b = String(t.name || '').trim();
+      var lg = String(t.logo || '');
+      if (teamNames[side] !== b) { teamNames[side] = b; changed = true; }
+      if (teamLogos[side] !== lg) { teamLogos[side] = lg; changed = true; }
+    });
+    if (changed) { applyTeamNames(); applyTeamLogos(); }
+    return board;
+  };
+
   board.setTeamNames = function (names) {
     names = names || {};
-    var b = String(names.blue || '').trim();
-    var r = String(names.red || '').trim();
-    if (teamNames.blue === b && teamNames.red === r) return board;
-    teamNames.blue = b;
-    teamNames.red = r;
-    applyTeamNames();
-    return board;
+    var cur = {
+      blue: { name: teamNames.blue, logo: teamLogos.blue },
+      red: { name: teamNames.red, logo: teamLogos.red }
+    };
+    cur.blue.name = String(names.blue || '').trim();
+    cur.red.name = String(names.red || '').trim();
+    return board.setTeams(cur);
+  };
+
+  board.teams = function () {
+    return {
+      blue: { name: teamNames.blue, logo: teamLogos.blue },
+      red: { name: teamNames.red, logo: teamLogos.red }
+    };
   };
   board.teamNames = function () {
     return { blue: teamNames.blue, red: teamNames.red };
   };
+
+  function applyTeamLogos() {
+    [['blue', '蓝方'], ['red', '红方']].forEach(function (pair) {
+      var side = pair[0], fallback = pair[1];
+      var h = teamHeads[side];
+      if (!h) return;
+      var src = teamLogos[side];
+      h.head.classList.toggle('has-logo', !!src);
+      h.fb.textContent = (teamNames[side] || fallback).slice(0, 1);
+      if (!src) {
+        h.img.removeAttribute('src');
+        h.img.style.display = 'none';
+        return;
+      }
+      h.img.style.display = '';
+      if (h.img.getAttribute('src') !== src) h.img.src = src;
+      /* 图片坏了就退回首字（用户贴了没用的链接时不能显示破图） */
+      h.img.onerror = function () {
+        h.img.style.display = 'none';
+        h.head.classList.remove('has-logo');
+      };
+      h.img.onload = function () {
+        h.img.style.display = '';
+        h.head.classList.add('has-logo');
+      };
+    });
+  }
 
   function applyTeamNames() {
     [['blue', '蓝方'], ['red', '红方']].forEach(function (pair) {
@@ -123,12 +176,20 @@ window.WZ = window.WZ || {};
 
     /* 战队名横条：放在队伍栏顶部，直播画面上能直接看到「哪支队在蓝/红方」 */
     var head = util.el('div', 'team-head team-head-' + side);
+    var logo = util.el('div', 'team-head-logo');
+    var img = document.createElement('img');
+    img.alt = '';
+    img.decoding = 'async';
+    var lfallback = util.el('span', 'team-head-logo-fb', side === 'blue' ? '蓝' : '红');
+    logo.appendChild(lfallback);
+    logo.appendChild(img);
     var tname = util.el('div', 'team-head-name', side === 'blue' ? '蓝方' : '红方');
     var tside = util.el('div', 'team-head-side', side === 'blue' ? 'BLUE' : 'RED');
+    head.appendChild(logo);
     head.appendChild(tname);
     head.appendChild(tside);
     lane.appendChild(head);
-    teamHeads[side] = { head: head, name: tname };
+    teamHeads[side] = { head: head, name: tname, logo: logo, img: img, fb: lfallback };
 
     for (var i = 0; i < 5; i++) {
       var slot = util.el('div', 'pick-slot empty-' + side);

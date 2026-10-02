@@ -55,6 +55,27 @@ window.WZ = window.WZ || {};
     dom.preH2hRed = document.getElementById('preH2hRed');
     dom.preH2hNote = document.getElementById('preH2hNote');
 
+    /* 战绩面板内部节点 */
+    dom.rec = document.getElementById('recordOverlay');
+    dom.recEvent = document.getElementById('recEvent');
+    dom.recTitle = document.getElementById('recTitle');
+    dom.recBo = document.getElementById('recBo');
+    dom.recBlueName = document.getElementById('recBlueName');
+    dom.recRedName = document.getElementById('recRedName');
+    dom.recBlueWins = document.getElementById('recBlueWins');
+    dom.recRedWins = document.getElementById('recRedWins');
+    dom.recBlueLogo = document.getElementById('recBlueLogo');
+    dom.recRedLogo = document.getElementById('recRedLogo');
+    dom.recBlueFb = document.getElementById('recBlueFb');
+    dom.recRedFb = document.getElementById('recRedFb');
+    dom.recBlue = document.getElementById('recBlue');
+    dom.recRed = document.getElementById('recRed');
+    dom.recGames = document.getElementById('recGames');
+    dom.recChampion = document.getElementById('recChampion');
+    dom.recChampionText = document.getElementById('recChampionText');
+    dom.recNote = document.getElementById('recNote');
+    dom.recEmpty = document.getElementById('recEmpty');
+
     if (dom.mvpArt) util.bindImgFallback(dom.mvpArt, 'M');
     return overlay;
   };
@@ -68,7 +89,8 @@ window.WZ = window.WZ || {};
   };
 
   overlay.fit = function () {
-    var host = document.body.classList.contains('overlay-pre') ? dom.pre : dom.mvp;
+    var host = document.body.classList.contains('overlay-pre') ? dom.pre
+      : (document.body.classList.contains('overlay-record') ? dom.rec : dom.mvp);
     if (!host) return;
     /* 顶部提示条占掉的高度要扣掉，否则整块会往下溢出被 overflow:hidden 切掉 */
     var flag = document.getElementById('displayFlag');
@@ -241,18 +263,113 @@ window.WZ = window.WZ || {};
     show(dom.preH2h, !!(h.blueWins || h.redWins || h.note));
   };
 
+  /* ---------------- 战绩面板（谁赢了） ---------------- */
+
+  overlay.renderRecord = function (d) {
+    if (!dom.rec) return;
+    var rec = (d && d.record) || {};
+    var pre = (d && d.pre) || {};
+    var sc = WZ.story && WZ.story.score ? WZ.story.score(d) : { blue: 0, red: 0, played: 0, total: 0 };
+    var winner = WZ.story && WZ.story.winnerSide ? WZ.story.winnerSide(d) : '';
+
+    var blueName = (pre.blue && pre.blue.name) || '蓝方';
+    var redName = (pre.red && pre.red.name) || '红方';
+
+    setText(dom.recEvent, d && d.event);
+    setText(dom.recTitle, rec.title || '战 绩');
+    setText(dom.recBlueName, blueName);
+    setText(dom.recRedName, redName);
+    setText(dom.recBlueWins, String(sc.blue));
+    setText(dom.recRedWins, String(sc.red));
+    setText(dom.recBo, rec.bestOf || (d && d.bestOf) || (sc.total ? 'BO' + sc.total : ''));
+    setText(dom.recNote, rec.note);
+
+    /* 战队头像（没有就用队名首字占位） */
+    logoInto(dom.recBlueLogo, dom.recBlueFb, (pre.blue && pre.blue.logo) || '', blueName);
+    logoInto(dom.recRedLogo, dom.recRedFb, (pre.red && pre.red.logo) || '', redName);
+
+    /* 领先/获胜方高亮 */
+    if (dom.recBlue) {
+      dom.recBlue.classList.toggle('is-ahead', sc.blue > sc.red);
+      dom.recBlue.classList.toggle('is-champion', winner === 'blue');
+    }
+    if (dom.recRed) {
+      dom.recRed.classList.toggle('is-ahead', sc.red > sc.blue);
+      dom.recRed.classList.toggle('is-champion', winner === 'red');
+    }
+
+    /* 冠军横幅 */
+    if (dom.recChampion) {
+      dom.recChampion.hidden = !winner;
+      if (winner) setText(dom.recChampionText, (winner === 'blue' ? blueName : redName) + ' 获胜');
+    }
+
+    /* 每一局的结果 */
+    if (dom.recGames) {
+      dom.recGames.innerHTML = '';
+      var games = rec.games || [];
+      var shows = games.filter(function (g) { return g && (g.winner || true); });
+      if (!shows.length) {
+        var ph = document.createElement('div');
+        ph.className = 'rg-empty';
+        ph.textContent = '还没有记录任何一局';
+        dom.recGames.appendChild(ph);
+      } else {
+        games.forEach(function (g, i) {
+          var cell = document.createElement('div');
+          cell.className = 'rg-cell' + (g.winner === 'blue' ? ' win-blue'
+            : (g.winner === 'red' ? ' win-red' : ' pending'));
+          var no = document.createElement('div');
+          no.className = 'rg-no';
+          no.textContent = '第 ' + (g.no || i + 1) + ' 局';
+          var w = document.createElement('div');
+          w.className = 'rg-win';
+          w.textContent = g.winner === 'blue' ? '蓝胜' : (g.winner === 'red' ? '红胜' : '—');
+          cell.appendChild(no);
+          cell.appendChild(w);
+          dom.recGames.appendChild(cell);
+        });
+      }
+    }
+
+    show(dom.recEmpty, !rec.visible);
+  };
+
+  /* 把 logo 塞进 <img>，没有/坏了就把首字占位显示出来。
+     注意 display 要显式设成 'block'：样式表里 .rs-logo img 默认是 display:none，
+     只把 style.display 清成 '' 是压不过样式表的（之前就是这么没显示出来的）。 */
+  function logoInto(img, fb, src, name) {
+    if (!img || !fb) return;
+    setText(fb, String(name || '?').slice(0, 1));
+    if (!src) {
+      img.removeAttribute('src');
+      img.style.display = 'none';
+      fb.style.display = '';
+      return;
+    }
+    if (img.getAttribute('src') !== src) img.src = src;
+    img.style.display = 'block';
+    fb.style.display = 'none';
+    img.onerror = function () {
+      img.style.display = 'none';
+      fb.style.display = '';
+    };
+  }
+
   /* ---------------- 统一入口 ---------------- */
 
   overlay.render = function (d) {
     if (!d) return;
     overlay.renderMvp(d);
     overlay.renderPre(d);
+    overlay.renderRecord(d);
   };
 
   /* 采集页：只渲染对应那一个，另一个保持隐藏 */
   overlay.renderFor = function (mode, d) {
     if (mode === 'mvp') overlay.renderMvp(d);
     else if (mode === 'pre') overlay.renderPre(d);
+    else if (mode === 'record') overlay.renderRecord(d);
     else overlay.render(d);
   };
 

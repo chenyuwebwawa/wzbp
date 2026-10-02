@@ -147,6 +147,7 @@
   <div class="sd-tabs" id="sdTabs">
     <button type="button" data-tab="mvp" class="on">MVP 卡</button>
     <button type="button" data-tab="pre">赛前面板</button>
+    <button type="button" data-tab="record">战绩面板</button>
   </div>
   <div class="sd-body" id="sdBody"></div>
 </aside>
@@ -222,6 +223,44 @@
         <div class="team-players"></div>
       </section>
     </div>
+  </div>
+</div>
+
+<!-- ================= 战绩面板（谁赢了） ================= -->
+<div class="overlay" id="recordOverlay">
+  <div class="ov-frame">
+    <div class="ov-scanline"></div>
+    <header class="rec-head">
+      <div class="rec-event" id="recEvent"></div>
+      <div class="rec-title" id="recTitle">战 绩</div>
+    </header>
+
+    <div class="rec-score">
+      <section class="rec-side is-blue" id="recBlue">
+        <div class="rs-logo"><img id="recBlueLogo" alt=""><span id="recBlueFb">蓝</span></div>
+        <div class="rs-name" id="recBlueName">蓝方</div>
+        <div class="rs-wins" id="recBlueWins">0</div>
+      </section>
+
+      <div class="rec-center">
+        <div class="rec-vs">VS</div>
+        <div class="rec-bo" id="recBo"></div>
+        <div class="rec-champion" id="recChampion" hidden>
+          <span class="rc-crown">🏆</span>
+          <span class="rc-text" id="recChampionText"></span>
+        </div>
+      </div>
+
+      <section class="rec-side is-red" id="recRed">
+        <div class="rs-logo"><img id="recRedLogo" alt=""><span id="recRedFb">红</span></div>
+        <div class="rs-name" id="recRedName">红方</div>
+        <div class="rs-wins" id="recRedWins">0</div>
+      </section>
+    </div>
+
+    <div class="rec-games" id="recGames"></div>
+    <div class="rec-note" id="recNote"></div>
+    <div class="overlay-empty console-only" id="recEmpty">还没有战绩 —— 在「赛事面板 → 战绩」里逐局记胜负</div>
   </div>
 </div>
 

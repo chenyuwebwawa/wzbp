@@ -85,11 +85,14 @@ window.WZ = window.WZ || {};
   };
 
   panel.setTab = function (t) {
-    tab = t === 'pre' ? 'pre' : 'mvp';
+    tab = (t === 'pre' || t === 'record') ? t : 'mvp';
     util.$$('button', dom.tabs).forEach(function (b) {
       b.classList.toggle('on', b.dataset.tab === tab);
     });
-    if (dom.title) dom.title.textContent = tab === 'mvp' ? 'MVP 数据面板' : '赛前面板';
+    if (dom.title) {
+      dom.title.textContent = tab === 'mvp' ? 'MVP 数据面板'
+        : (tab === 'record' ? '战绩面板' : '赛前面板');
+    }
     panel.refresh();
   };
 
@@ -105,7 +108,8 @@ window.WZ = window.WZ || {};
     }
     dom.body.innerHTML = '';
     var d = story.get();
-    dom.body.appendChild(tab === 'mvp' ? buildMvpForm(d) : buildPreForm(d));
+    dom.body.appendChild(tab === 'mvp' ? buildMvpForm(d)
+      : (tab === 'record' ? buildRecordForm(d) : buildPreForm(d)));
   };
 
   function field(label, value, path, opts) {
@@ -381,6 +385,119 @@ window.WZ = window.WZ || {};
     return frag;
   }
 
+  /* ------------------------------------------------------------
+     战绩表单：逐局记胜负，自动算大比分与冠军
+     ------------------------------------------------------------ */
+  function buildRecordForm(d) {
+    var frag = document.createDocumentFragment();
+    var rec = d.record || {};
+    var pre = d.pre || {};
+
+    /* 显示开关 + 面板信息 */
+    var sec0 = util.el('div', 'sd-section');
+    sec0.appendChild(util.el('h4', '', '战绩面板'));
+    sec0.appendChild(util.el('div', 'sd-hint',
+      '逐局点「蓝胜 / 红胜」即可，大比分和冠军会自动算。队名与头像取自「赛前面板」，不用重复填。'));
+    sec0.appendChild(buildVisibilityRow('record'));
+    var r0 = util.el('div', 'field-row');
+    r0.appendChild(field('面板标题', rec.title, 'record.title', { placeholder: '留空显示「战 绩」' }));
+    r0.appendChild(field('赛制', rec.bestOf, 'record.bestOf', { placeholder: '如 BO5' }));
+    sec0.appendChild(r0);
+    var r0b = util.el('div', 'field-row');
+    r0b.appendChild(field('底部备注', rec.note, 'record.note', { placeholder: '可选' }));
+    sec0.appendChild(r0b);
+    frag.appendChild(sec0);
+
+    /* 对阵双方（只读：改队名去赛前面板） */
+    var sc = story.score(d);
+    var secVs = util.el('div', 'sd-section');
+    secVs.appendChild(util.el('h4', '', '对阵（队名 / 头像在「赛前面板」里改）'));
+    var vs = util.el('div', 'rec-vs-row');
+    [['blue', '蓝方'], ['red', '红方']].forEach(function (it) {
+      var side = it[0];
+      var t = pre[side] || {};
+      var box = util.el('div', 'rec-vs-item is-' + side);
+      var logo = util.el('div', 'rec-vs-logo');
+      if (t.logo) {
+        var img = document.createElement('img');
+        img.src = t.logo;
+        img.alt = '';
+        logo.appendChild(img);
+      } else {
+        logo.appendChild(util.el('span', '', String(t.name || it[1]).slice(0, 1)));
+      }
+      box.appendChild(logo);
+      box.appendChild(util.el('div', 'rec-vs-name', t.name || it[1]));
+      box.appendChild(util.el('div', 'rec-vs-score', String(side === 'blue' ? sc.blue : sc.red)));
+      vs.appendChild(box);
+    });
+    secVs.appendChild(vs);
+    var win = story.winnerSide(d);
+    secVs.appendChild(util.el('div', 'sd-hint', win
+      ? ('当前获胜：' + ((win === 'blue' ? pre.blue.name : pre.red.name) || (win === 'blue' ? '蓝方' : '红方')))
+      : '还没有分出胜负'));
+    frag.appendChild(secVs);
+
+    /* 逐局记胜负 */
+    var secG = util.el('div', 'sd-section');
+    secG.appendChild(util.el('h4', '', '每一局'));
+    var games = (rec.games && rec.games.length) ? rec.games : [{ no: 1, winner: '' }];
+    games.forEach(function (g) {
+      var row = util.el('div', 'rec-game-row');
+      row.appendChild(util.el('span', 'rg-label', '第 ' + g.no + ' 局'));
+      var btns = util.el('div', 'rg-btns');
+      [['blue', '蓝胜'], ['red', '红胜'], ['', '未打']].forEach(function (opt) {
+        var on = (g.winner || '') === opt[0];
+        var b = util.el('button', 'btn rg-btn' + (on ? ' on is-' + (opt[0] || 'none') : ''));
+        b.type = 'button';
+        b.textContent = opt[1];
+        b.addEventListener('click', function () {
+          story.setGameWinner(g.no, opt[0]);
+          panel.refresh();
+          broadcastOverlay();
+        });
+        btns.appendChild(b);
+      });
+      row.appendChild(btns);
+      secG.appendChild(row);
+    });
+
+    var rowBtn = util.el('div', 'field-row');
+    var syncBtn = util.el('button', 'btn btn-ghost', '按赛制对齐局数');
+    syncBtn.type = 'button';
+    syncBtn.title = '按「赛制」里的 BO 数增减局数（BO3 → 3 局）';
+    syncBtn.addEventListener('click', function () {
+      story.syncRecord();
+      panel.refresh();
+      broadcastOverlay();
+    });
+    rowBtn.appendChild(syncBtn);
+    var addBtn = util.el('button', 'btn btn-ghost', '+ 加一局');
+    addBtn.type = 'button';
+    addBtn.addEventListener('click', function () {
+      var gs = story.get().record.games.slice();
+      gs.push({ no: gs.length + 1, winner: '' });
+      story.setRecord({ games: gs });
+      panel.refresh();
+      broadcastOverlay();
+    });
+    rowBtn.appendChild(addBtn);
+    var clearBtn = util.el('button', 'btn btn-warn', '清空战绩');
+    clearBtn.type = 'button';
+    clearBtn.addEventListener('click', function () {
+      if (!window.confirm('把所有局的胜负记录清空？')) return;
+      var cur = story.get().record;
+      story.setRecord({ games: cur.games.map(function (x) { return { no: x.no, winner: '' }; }) });
+      panel.refresh();
+      broadcastOverlay();
+    });
+    rowBtn.appendChild(clearBtn);
+    secG.appendChild(rowBtn);
+    frag.appendChild(secG);
+
+    return frag;
+  }
+
   function buildVisibilityRow(which) {
     var wrap = util.el('div', 'field-row');
     var on = util.el('button', 'btn btn-primary', '显示到采集窗');
@@ -559,6 +676,7 @@ window.WZ = window.WZ || {};
     var raw = story.raw();
     if (mode === 'mvp' || mode === 'all') raw.mvp.visible = !!visible;
     if (mode === 'pre' || mode === 'all') raw.pre.visible = !!visible;
+    if (mode === 'record' || mode === 'all') raw.record.visible = !!visible;
     story.saveNow();
     story.touch();
 
@@ -566,7 +684,7 @@ window.WZ = window.WZ || {};
       WZ.sync.post({ t: 'overlay', payload: { mode: mode, visible: !!visible, story: story.get() } });
     }
     if (WZ.app && WZ.app.toast) {
-      var name = mode === 'mvp' ? 'MVP 卡' : (mode === 'pre' ? '赛前面板' : '赛事面板');
+      var name = mode === 'mvp' ? 'MVP 卡' : (mode === 'pre' ? '赛前面板' : (mode === 'record' ? '战绩面板' : '赛事面板'));
       WZ.app.toast(name + (visible ? '已显示到采集窗' : '已从采集窗隐藏'), 'ok');
     }
   }

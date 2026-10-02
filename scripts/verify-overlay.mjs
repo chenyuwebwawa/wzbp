@@ -124,17 +124,33 @@ try {
       },
       pre: {
         blue: { name: '成都AG超玩会', winRate: '78%', recent: '5胜1负', rank: '常规赛第1',
+                logo: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAABSElEQVR4nO3by3GDMBSF4XP/ZrLPMtWkCJeRIlJNltmnGmfrYcAWQuh1+Ha2QbpHQgxjW9LFW9Ts7OP7fk857uczqtUVPQRuOSDRa+hagxGjBD9rIGK04KUHgpHDl6iBVh2XdKSWqNlZj0uCmcLn1MhZDbe0p1ZKN9iL1JqROWac/T21c7SB3r3KQO6JI3mWBZmLUrP/e3tTTe9ff0UekpA5Zl77KdmQOWQOl8t/KyMyh8whczit/7WsyBwyh8whc8gcMofMIXPIHC3+ltLaY1ZkDplD5nh84XAfWGZE5pA5lm/MvAyuX4ZWhDbM9hXZ1pWNzLH1wUz3gmdZyD1xFK8ycLSBnqXUjsyRctCIV0FqzZRusAd7auWshlvZW2PkdtTbg1Lu5FC7wzMcqYVWHZdytIYoVYjtpqkl221zayw3To62dfYic/+U7o9ssBR62QAAAABJRU5ErkJggg==',
                 info: [{ label: '场均时长', value: '14:32' }] },
         red:  { name: '重庆狼队', winRate: '71%', recent: '4胜2负', rank: '常规赛第3',
+                logo: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAABSElEQVR4nO3by3GDMBSF4XP/blJIltmkABeXArLJMoWkHGfrYcAWQuh1+Ha2QbpHQgxjW9LFW9Ts7P5xu6ccFz9f1eqKHgK3HJDoNXStwYhRgp81EDFa8NIDwcjhS9RAq45LOlJL1OysxyXBTOFzauSshlvaUyulG+xFas3IHDPO/p7aOdpA715lIPfEkTzLgsxFqdl/+/1WTX/vn0UekpA5Zl77KdmQOWQOl8t/KyMyh8whczit/7WsyBwyh8whc8gcMofMIXPIHC3+ltLaY1ZkDplD5nh84XAfWGZE5pA5lm/MvAyuX4ZWhDbM9hXZ1pWNzLH1wUz3gmdZyD1xFK8ycLSBnqXUjsyRctCIV0FqzZRusAd7auWshlvZW2PkdtTbg1Lu5FC7wzMcqYVWHZdytIYoVYjtpqkl221zayw3To62dfYic/81No9s4TpA4wAAAABJRU5ErkJggg==",
                 info: [{ label: '场均时长', value: '15:48' }] },
         h2h: { blueWins: '3', redWins: '2', note: '近 5 次交手，蓝方 3 胜 2 负略占上风' },
         useDraftPicks: true
+      },
+      /* 战绩：BO5 打完，蓝方 3:2 获胜 */
+      record: {
+        visible: true, title: '', bestOf: 'BO5', note: '下一场 20:00',
+        games: [
+          { no: 1, winner: 'blue' },
+          { no: 2, winner: 'red' },
+          { no: 3, winner: 'blue' },
+          { no: 4, winner: 'red' },
+          { no: 5, winner: 'blue' }
+        ]
       }
     });
     S.saveNow();
-    return JSON.stringify({ mvpHero: S.get().mvp.heroId, blue: S.get().pre.blue.name });
+    return JSON.stringify({ mvpHero: S.get().mvp.heroId, blue: S.get().pre.blue.name,
+                            score: S.score(), winner: S.winnerSide() });
   })()`);
   check('控制窗数据写入成功', setRes.indexOf('THREW') !== 0, setRes);
+  check('战绩夹具算出的比分是 3:2 且蓝方获胜',
+    /"blue":3/.test(setRes) && /"red":2/.test(setRes) && /"winner":"blue"/.test(setRes), setRes);
 
   /* 打满一局，制造 5+5 个 pick */
   const draftRes = await evalIn(consoleC, `(function(){
@@ -362,6 +378,77 @@ try {
   check('战队情报 chip 已渲染', preState.blueChips >= 4, '蓝方 ' + preState.blueChips + ' 个');
   check('选手位原画已加载（10 张）', preState.artCount === 10, '实际 ' + preState.artCount);
   await shot(preC, 'overlay-pre.png');
+
+  /* ---------- 战绩采集窗（谁赢了） ---------- */
+  console.log('\n[4b] 战绩采集窗');
+  const recC = await openPage(fileUrl('overlay.html', '?wzrole=overlay&mode=record'));
+  await sleep(4000);
+  const recState = JSON.parse(await evalIn(recC, `JSON.stringify({
+    bodyClass: document.body.className,
+    recDisplay: getComputedStyle(document.getElementById('recordOverlay')).display,
+    mvpDisplay: getComputedStyle(document.getElementById('mvpOverlay')).display,
+    preDisplay: getComputedStyle(document.getElementById('preOverlay')).display,
+    title: document.getElementById('recTitle').textContent,
+    bo: document.getElementById('recBo').textContent,
+    blueName: document.getElementById('recBlueName').textContent,
+    redName: document.getElementById('recRedName').textContent,
+    blueWins: document.getElementById('recBlueWins').textContent,
+    redWins: document.getElementById('recRedWins').textContent,
+    games: document.querySelectorAll('#recGames .rg-cell').length,
+    winBlue: document.querySelectorAll('#recGames .rg-cell.win-blue').length,
+    winRed: document.querySelectorAll('#recGames .rg-cell.win-red').length,
+    championShown: !document.getElementById('recChampion').hidden,
+    championText: document.getElementById('recChampionText').textContent,
+    blueChampion: document.getElementById('recBlue').classList.contains('is-champion'),
+    redChampion: document.getElementById('recRed').classList.contains('is-champion'),
+    blueAhead: document.getElementById('recBlue').classList.contains('is-ahead'),
+    blueLogo: !!document.querySelector('#recBlue .rs-logo img').getAttribute('src'),
+    note: document.getElementById('recNote').textContent
+  })`));
+
+  check('只显示战绩覆盖层',
+    recState.recDisplay !== 'none' && recState.mvpDisplay === 'none' && recState.preDisplay === 'none',
+    recState.recDisplay + '/' + recState.mvpDisplay + '/' + recState.preDisplay);
+  check('面板标题已渲染', recState.title === '战 绩' || recState.title.length > 0, recState.title);
+  check('双方队名取自赛前面板',
+    recState.blueName === '成都AG超玩会' && recState.redName === '重庆狼队',
+    recState.blueName + ' / ' + recState.redName);
+  check('大比分已渲染（蓝 3 : 红 2）',
+    recState.blueWins === '3' && recState.redWins === '2',
+    recState.blueWins + ':' + recState.redWins);
+  check('每一局都有一格', recState.games === 5, String(recState.games));
+  check('每局胜方分别标记（3 蓝胜 / 2 红胜）',
+    recState.winBlue === 3 && recState.winRed === 2,
+    recState.winBlue + '/' + recState.winRed);
+  check('冠军横幅显示且指向蓝方',
+    recState.championShown && /成都AG超玩会/.test(recState.championText) && /获胜/.test(recState.championText),
+    recState.championText);
+  check('蓝方被标记为冠军、红方没有',
+    recState.blueChampion === true && recState.redChampion === false,
+    recState.blueChampion + '/' + recState.redChampion);
+  check('领先方高亮', recState.blueAhead === true, String(recState.blueAhead));
+  check('战队头像渲染进战绩面板', recState.blueLogo === true, String(recState.blueLogo));
+  /* 头像必须真的「看得见」：样式表里 .rs-logo img 默认 display:none，
+     只清内联样式压不过它（曾经真的没显示出来，截图才发现）。 */
+  const recLogoVis = JSON.parse(await evalIn(recC, `JSON.stringify({
+    blueDisp: getComputedStyle(document.querySelector('#recBlue .rs-logo img')).display,
+    redDisp: getComputedStyle(document.querySelector('#recRed .rs-logo img')).display,
+    blueFb: getComputedStyle(document.getElementById('recBlueFb')).display,
+    redFb: getComputedStyle(document.getElementById('recRedFb')).display,
+    blueNat: document.querySelector('#recBlue .rs-logo img').naturalWidth,
+    redNat: document.querySelector('#recRed .rs-logo img').naturalWidth
+  })`));
+  check('两边头像都真的可见（display=block）',
+    recLogoVis.blueDisp === 'block' && recLogoVis.redDisp === 'block',
+    recLogoVis.blueDisp + '/' + recLogoVis.redDisp);
+  check('有头像时首字占位隐藏',
+    recLogoVis.blueFb === 'none' && recLogoVis.redFb === 'none',
+    recLogoVis.blueFb + '/' + recLogoVis.redFb);
+  check('头像图片真的解码成功（naturalWidth > 0）',
+    recLogoVis.blueNat > 0 && recLogoVis.redNat > 0,
+    recLogoVis.blueNat + '/' + recLogoVis.redNat);
+  check('备注已渲染', recState.note === '下一场 20:00', recState.note);
+  await shot(recC, 'overlay-record.png');
 
   /* ---------- 实时同步：控制窗改数据，采集窗跟着变 ---------- */
   console.log('\n[5] 实时同步');

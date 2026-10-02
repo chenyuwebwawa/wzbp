@@ -322,6 +322,49 @@ window.__SMOKE__ = (function () {
         WZ.board.setTeamNames({ blue: '', red: '' });
       }
     }
+
+    /* ---------- 10c. 战队头像 ---------- */
+    {
+      ok(typeof WZ.board.setTeams === 'function', 'board 暴露了 setTeams（名字 + 头像）');
+      var logoBtn = document.querySelector('#teamNameBar .tnb-logo');
+      ok(!!logoBtn, '控制台里战队名旁边有头像按钮');
+      var fileInput = document.querySelector('#teamNameBar .tnb-file');
+      ok(!!fileInput && fileInput.type === 'file', '头像按钮配了 file 选择器');
+
+      /* 1x1 红点 PNG，够小、能验证「图片真的进了 <img>」 */
+      var dot = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAABSElEQVR4nO3by3GDMBSF4XP/ZrLPMtWkCJeRIlJNltmnGmfrYcAWQuh1+Ha2QbpHQgxjW9LFW9Ts7OP7fk857uczqtUVPQRuOSDRa+hagxGjBD9rIGK04KUHgpHDl6iBVh2XdKSWqNlZj0uCmcLn1MhZDbe0p1ZKN9iL1JqROWac/T21c7SB3r3KQO6JI3mWBZmLUrP/e3tTTe9ff0UekpA5Zl77KdmQOWQOl8t/KyMyh8whczit/7WsyBwyh8whc8gcMofMIXPIHC3+ltLaY1ZkDplD5nh84XAfWGZE5pA5lm/MvAyuX4ZWhDbM9hXZ1pWNzLH1wUz3gmdZyD1xFK8ycLSBnqXUjsyRctCIV0FqzZRusAd7auWshlvZW2PkdtTbg1Lu5FC7wzMcqYVWHZdytIYoVYjtpqkl221zayw3To62dfYic/+U7o9ssBR62QAAAABJRU5ErkJggg==';
+      if (WZ.app && WZ.app.setTeamLogo) {
+        WZ.app.setTeamLogo('blue', dot);
+        await wait(260);
+        var bImg = document.querySelector('#pickLaneBlue .team-head-logo img');
+        var bHead = document.querySelector('#pickLaneBlue .team-head');
+        ok(!!bImg, '蓝方战队名横条里有头像 <img>');
+        eq(bImg.getAttribute('src'), dot, '头像 src 与设置的一致');
+        ok(bHead.classList.contains('has-logo'), '有头像时横条加上 has-logo');
+        eq(bHead.querySelector('.team-head-logo-fb').textContent, '蓝', '占位首字用的是队名首字');
+
+        /* 同步载荷要带上头像，展示窗才能显示 */
+        var snap = WZ.app.snapshotForTest ? WZ.app.snapshotForTest() : null;
+        ok(snap && snap.teams && snap.teams.blue && snap.teams.blue.logo === dot,
+          '同步载荷里带上了战队头像');
+
+        /* 清除后要回到首字占位，不留破图 */
+        WZ.app.setTeamLogo('blue', '');
+        await wait(220);
+        var bHead2 = document.querySelector('#pickLaneBlue .team-head');
+        ok(!bHead2.classList.contains('has-logo'), '清除头像后去掉 has-logo');
+        ok(!bHead2.querySelector('img').getAttribute('src'), '清除后 <img> 不再持有 src');
+      }
+      /* 坏图不能显示成破图 */
+      if (WZ.board.setTeams) {
+        WZ.board.setTeams({ blue: { name: '测试队', logo: 'data:image/png;base64,NOTVALID' },
+                            red: { name: '', logo: '' } });
+        await wait(200);
+        eq(document.querySelector('#pickLaneBlue .team-head-name').textContent, '测试队',
+          '坏头像不影响队名显示');
+        WZ.board.setTeams({ blue: { name: '', logo: '' }, red: { name: '', logo: '' } });
+      }
+    }
     /* ---------- 11. 导出 / 导入 round-trip ---------- */
     D.init('ranked');
     for (var k = 0; k < 5; k++) {

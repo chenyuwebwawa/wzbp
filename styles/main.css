@@ -795,3 +795,66 @@ body.role-display .stage { padding: 12px; height: 100vh; }
   .appbar-center { order: 3; width: 100%; justify-content: flex-start; }
 }
 
+
+/* v4：战队头像上传控件（控制台） */
+.tnb-logo {
+  position: relative;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: var(--panel-3);
+  cursor: pointer;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.tnb-blue .tnb-logo { border-color: rgba(58, 160, 255, .55); }
+.tnb-red .tnb-logo { border-color: rgba(255, 77, 94, .55); }
+.tnb-logo:hover { filter: brightness(1.2); }
+.tnb-logo img { width: 100%; height: 100%; object-fit: cover; display: none; }
+.tnb-logo.has-logo img { display: block; }
+.tnb-logo.has-logo .tnb-logo-fb { display: none; }
+.tnb-logo-fb { font-size: 11px; font-weight: 800; color: var(--text-dim); }
+.tnb-logo-x {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 12px;
+  height: 12px;
+  line-height: 11px;
+  text-align: center;
+  border-radius: 50%;
+  background: #5a2a2f;
+  color: #ffc7ce;
+  font-size: 11px;
+  opacity: 0;
+  transition: opacity .15s;
+}
+.tnb-logo:hover .tnb-logo-x { opacity: 1; }
+.tnb-file { display: none; }
+
+/* v4：战绩表单（赛事面板 → 战绩面板） */
+.rec-vs-row { display: flex; gap: 10px; margin-bottom: 8px; }
+.rec-vs-item { flex: 1 1 0; display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: 9px 8px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel-2); }
+.rec-vs-item.is-blue { border-color: rgba(58,160,255,.42); }
+.rec-vs-item.is-red { border-color: rgba(255,77,94,.42); }
+.rec-vs-logo { width: 40px; height: 40px; border-radius: 50%; overflow: hidden;
+  display: flex; align-items: center; justify-content: center; background: var(--panel-3); }
+.rec-vs-logo img { width: 100%; height: 100%; object-fit: cover; }
+.rec-vs-logo span { font-size: 17px; font-weight: 800; color: var(--text-dim); }
+.rec-vs-name { font-size: 12.5px; color: var(--text); max-width: 100%; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.rec-vs-score { font-family: var(--font-num); font-size: 22px; font-weight: 800; color: var(--text); }
+.rec-game-row { display: flex; align-items: center; gap: 9px; margin-bottom: 7px; }
+.rg-label { flex: 0 0 62px; font-size: 12.5px; color: var(--text-dim); }
+.rg-btns { display: flex; gap: 6px; flex: 1 1 auto; }
+.rg-btn { flex: 1 1 0; padding: 5px 4px; font-size: 12px; }
+.rg-btn.on.is-blue { border-color: rgba(58,160,255,.7); background: rgba(58,160,255,.2); color: #a9d6ff; }
+.rg-btn.on.is-red { border-color: rgba(255,77,94,.7); background: rgba(255,77,94,.2); color: #ffc3ca; }
+.rg-btn.on.is-none { border-color: #3a4a66; background: var(--panel-3); }
+.sd-hint { margin-bottom: 8px; color: var(--text-faint); font-size: 12.5px; line-height: 1.7; }

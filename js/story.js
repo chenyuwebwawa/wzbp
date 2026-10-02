@@ -80,9 +80,65 @@ window.WZ = window.WZ || {};
         h2h: { blueWins: '', redWins: '', note: '' },
         /* 自动用本局 BP 结果填充双方英雄 */
         useDraftPicks: true
+      },
+      /* ---- 战绩面板 ----
+         games：每一局的胜方（'blue' | 'red' | '' 未记）
+         visible：是否在采集画面上显示
+         title：面板标题（留空则用「赛事名 · 大比分」自动生成） */
+      record: {
+        visible: false,
+        title: '',
+        bestOf: '',                 // 如「BO5」，留空则跟 story.bestOf
+        games: [ { no: 1, winner: '' } ],
+        note: ''                    // 底部一行备注
       }
     };
   }
+
+  /* 大比分：从每局胜方累加 */
+  story.score = function (d) {
+    d = d || data;
+    var gs = (d.record && d.record.games) || [];
+    var b = 0, r = 0;
+    gs.forEach(function (g) {
+      if (g.winner === 'blue') b++;
+      else if (g.winner === 'red') r++;
+    });
+    return { blue: b, red: r, played: gs.filter(function (g) { return !!g.winner; }).length, total: gs.length };
+  };
+
+  /* 谁赢了整场：先看有没有一方达到「BO几 的过半」，否则看谁领先 */
+  story.winnerSide = function (d) {
+    d = d || data;
+    var sc = story.score(d);
+    var boRaw = String((d.record && d.record.bestOf) || d.bestOf || '').replace(/[^0-9]/g, '');
+    var bo = Number(boRaw) || 0;
+    var need = bo ? Math.floor(bo / 2) + 1 : 0;
+    if (need) {
+      if (sc.blue >= need) return 'blue';
+      if (sc.red >= need) return 'red';
+      return '';
+    }
+    if (sc.blue > sc.red) return 'blue';
+    if (sc.red > sc.blue) return 'red';
+    return '';
+  };
+
+  /* 确保 record.games 长度与 bestOf 对得上（BO3 → 最多 3 局） */
+  story.syncRecordGames = function (d) {
+    d = d || data;
+    var boRaw = String((d.record && d.record.bestOf) || d.bestOf || '').replace(/[^0-9]/g, '');
+    var bo = Math.max(1, Math.min(9, Number(boRaw) || 1));
+    var rec = d.record || (d.record = { visible: false, title: '', bestOf: '', games: [], note: '' });
+    var gs = Array.isArray(rec.games) ? rec.games : [];
+    var out = [];
+    for (var i = 0; i < bo; i++) {
+      var g = gs[i] || {};
+      out.push({ no: i + 1, winner: (g.winner === 'blue' || g.winner === 'red') ? g.winner : '' });
+    }
+    rec.games = out;
+    return rec;
+  };
 
   var data = defaults();
 
@@ -207,6 +263,39 @@ window.WZ = window.WZ || {};
     var t = data.pre[side];
     if (!t || !t.players[index]) return story.get();
     Object.keys(patch).forEach(function (k) { t.players[index][k] = patch[k]; });
+    save(); emit();
+    return story.get();
+  };
+
+  /* ------------------------------------------------------------
+     战绩面板
+     ------------------------------------------------------------ */
+
+  story.setRecord = function (patch) {
+    patch = patch || {};
+    var rec = data.record || (data.record = { visible: false, title: '', bestOf: '', games: [], note: '' });
+    Object.keys(patch).forEach(function (k) {
+      if (k === 'games') return;                 // games 走 setGameWinner，避免整段覆盖
+      rec[k] = patch[k];
+    });
+    if (patch.bestOf !== undefined) story.syncRecordGames(data);
+    save(); emit();
+    return story.get();
+  };
+
+  /* 记某一局的胜方；winner 传 '' 表示清掉这局 */
+  story.setGameWinner = function (no, winner) {
+    var rec = story.syncRecordGames(data);
+    var idx = Math.max(0, Number(no) - 1);
+    if (!rec.games[idx]) return story.get();
+    rec.games[idx].winner = (winner === 'blue' || winner === 'red') ? winner : '';
+    save(); emit();
+    return story.get();
+  };
+
+  /* 让记录局数与 BO 对齐（切 BO 时调用） */
+  story.syncRecord = function () {
+    story.syncRecordGames(data);
     save(); emit();
     return story.get();
   };

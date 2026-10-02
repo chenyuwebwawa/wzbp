@@ -15,9 +15,10 @@ body.overlay-page {
   display: block;
 }
 
-/* 采集页显示哪一块由 body 上的 overlay-mvp / overlay-pre 决定 */
+/* 采集页显示哪一块由 body 上的 overlay-mvp / overlay-pre / overlay-record 决定 */
 body.overlay-page.overlay-mvp #mvpOverlay { display: block; }
 body.overlay-page.overlay-pre #preOverlay { display: block; }
+body.overlay-page.overlay-record #recordOverlay { display: block; }
 
 /* 采集页顶部的提示条：基础规则 .display-flag 是 display:none，
    只有展示窗的 body.role-display 才把它显示出来。
@@ -766,3 +767,63 @@ body.overlay-page .overlay {
 @media (max-width: 1100px) {
   .story-drawer { width: min(430px, 100vw); top: 0; }
 }
+
+/* ============================================================
+   战绩面板（谁赢了）—— 1600×900 设计稿
+   ============================================================ */
+.rec-head { text-align: center; padding: 26px 40px 6px; }
+.rec-event { font-family: var(--font-num); font-size: 17px; letter-spacing: 6px; color: #7f95bb; min-height: 22px; }
+.rec-title { margin-top: 6px; font-size: 46px; font-weight: 900; letter-spacing: 14px; color: #fff; text-shadow: 0 4px 26px rgba(0,0,0,.6); }
+
+.rec-score { display: flex; align-items: center; justify-content: center; gap: 46px; padding: 22px 60px 6px; }
+.rec-side { display: flex; flex-direction: column; align-items: center; gap: 10px; width: 380px; }
+.rs-logo { width: 116px; height: 116px; border-radius: 50%; overflow: hidden; position: relative;
+  display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,.05);
+  border: 3px solid var(--line); }
+.rec-side.is-blue .rs-logo { border-color: rgba(58,160,255,.55); box-shadow: 0 0 30px rgba(58,160,255,.22); }
+.rec-side.is-red .rs-logo { border-color: rgba(255,77,94,.55); box-shadow: 0 0 30px rgba(255,77,94,.22); }
+.rs-logo img { width: 100%; height: 100%; object-fit: cover; display: none; }
+.rs-logo span { font-size: 46px; font-weight: 900; color: var(--text-faint); }
+.rec-side.is-blue .rs-logo span { color: #a9d6ff; }
+.rec-side.is-red .rs-logo span { color: #ffc3ca; }
+.rs-name { font-size: 30px; font-weight: 800; color: #fff; max-width: 100%; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; text-align: center; }
+.rs-wins { font-family: var(--font-num); font-size: 74px; font-weight: 900; line-height: 1; color: #6d82a8; }
+.rec-side.is-blue.is-ahead .rs-wins { color: #5fb3ff; }
+.rec-side.is-red.is-ahead .rs-wins { color: #ff7d8d; }
+.rec-side.is-champion .rs-wins { color: var(--gold); text-shadow: 0 0 34px rgba(255,201,102,.55); }
+.rec-side.is-champion .rs-name { color: var(--gold); }
+.rec-side.is-champion .rs-logo { border-color: var(--gold); box-shadow: 0 0 40px rgba(255,201,102,.4); }
+
+.rec-center { display: flex; flex-direction: column; align-items: center; gap: 12px; min-width: 200px; }
+.rec-vs { font-family: var(--font-num); font-size: 34px; font-weight: 900; letter-spacing: 4px; color: #3d4d6b; }
+.rec-bo { font-family: var(--font-num); font-size: 13px; letter-spacing: 3px; color: #6d82a8; }
+.rec-champion { display: flex; align-items: center; gap: 9px; padding: 9px 20px; border-radius: 999px;
+  border: 1px solid rgba(255,201,102,.6); background: linear-gradient(135deg, rgba(255,201,102,.22), rgba(255,201,102,.06));
+  animation: recPop .45s cubic-bezier(.2,1.4,.4,1); }
+.rec-champion[hidden] { display: none; }
+.rc-crown { font-size: 22px; }
+.rc-text { font-size: 19px; font-weight: 800; color: var(--gold); letter-spacing: 1px; }
+@keyframes recPop { from { transform: scale(.72); opacity: 0 } to { transform: scale(1); opacity: 1 } }
+
+.rec-games { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; padding: 24px 80px 8px; }
+.rg-cell { min-width: 118px; padding: 11px 16px; border-radius: 11px; border: 1px solid var(--line);
+  background: var(--panel-2); text-align: center; }
+.rg-no { font-size: 12px; letter-spacing: 1px; color: #7f95bb; margin-bottom: 4px; }
+.rg-win { font-size: 21px; font-weight: 800; color: #55637f; }
+.rg-cell.win-blue { border-color: rgba(58,160,255,.55); background: rgba(58,160,255,.13); }
+.rg-cell.win-blue .rg-win { color: #5fb3ff; }
+.rg-cell.win-red { border-color: rgba(255,77,94,.55); background: rgba(255,77,94,.13); }
+.rg-cell.win-red .rg-win { color: #ff7d8d; }
+.rg-empty { color: var(--text-faint); font-size: 14px; }
+.rec-note { padding: 10px 80px 0; text-align: center; font-size: 14px; color: #7f95bb; min-height: 20px; }
+
+/* 战绩面板：内容垂直居中，避免下半部大片空白 */
+#recordOverlay .ov-frame {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding-bottom: 40px;
+  box-sizing: border-box;
+}
+#recordOverlay .rec-head { padding-top: 0; }

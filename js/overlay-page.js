@@ -16,15 +16,14 @@
     WZ.overlay.init();
     WZ.overlay.setMode(MODE);
 
-    /* 隐藏另一个覆盖层，只留当前模式 */
-    if (MODE === 'mvp') {
-      var pre = document.getElementById('preOverlay');
-      if (pre) pre.style.display = 'none';
-    } else {
-      var mvp = document.getElementById('mvpOverlay');
-      if (mvp) mvp.style.display = 'none';
-    }
-    document.title = '采集画面 · ' + (MODE === 'mvp' ? 'MVP 卡' : '赛前面板');
+    /* 隐藏另外两个覆盖层，只留当前模式 */
+    var keep = { mvp: 'mvpOverlay', pre: 'preOverlay', record: 'recordOverlay' }[MODE] || 'mvpOverlay';
+    ['mvpOverlay', 'preOverlay', 'recordOverlay'].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el && id !== keep) el.style.display = 'none';
+    });
+    document.title = '采集画面 · ' + (MODE === 'mvp' ? 'MVP 卡'
+      : (MODE === 'record' ? '战绩面板' : '赛前面板'));
 
     /* 先把本地存档铺上，避免打开瞬间空白 */
     WZ.story.load();

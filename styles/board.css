@@ -302,6 +302,38 @@ body.boss .stage { padding: 0; height: 100vh; }
   color: #56698c;
 }
 
+/* ---------- 战队头像 ---------- */
+.team-head-logo {
+  position: relative;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  overflow: hidden;
+  background: rgba(0, 0, 0, .35);
+  border: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.team-head-blue .team-head-logo { border-color: rgba(58, 160, 255, .55); }
+.team-head-red .team-head-logo { border-color: rgba(255, 77, 94, .55); }
+.team-head-logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: none;
+}
+.team-head.has-logo .team-head-logo img { display: block; }
+.team-head.has-logo .team-head-logo-fb { display: none; }
+.team-head-logo-fb {
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--text-faint);
+}
+.team-head-blue .team-head-logo-fb { color: #a9d6ff; }
+.team-head-red .team-head-logo-fb { color: #ffc3ca; }
+
 /* 单个 pick 卡：右侧原画 + 左侧信息 */
 .pick-slot {
   position: relative;

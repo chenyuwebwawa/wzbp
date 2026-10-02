@@ -276,11 +276,57 @@ window.WZ = window.WZ || {};
     if (!host) return;
     host.innerHTML = '';
 
-    var names = currentTeamNames();
-    [['blue', '蓝方战队名', names.blue], ['red', '红方战队名', names.red]].forEach(function (it) {
+    var teams = currentTeams();
+    [['blue', '蓝方战队名'], ['red', '红方战队名']].forEach(function (it) {
       var side = it[0];
+      var t = teams[side] || {};
       var wrap = util.el('label', 'tnb-item tnb-' + side);
+
+      /* 战队头像：点一下就选图，自动缩到 128px 存起来（本地存储放不下大图） */
+      var logoBtn = util.el('button', 'tnb-logo');
+      logoBtn.type = 'button';
+      logoBtn.title = '点击上传' + (side === 'blue' ? '蓝' : '红') + '方战队头像（会自动缩小）';
+      var logoImg = document.createElement('img');
+      logoImg.alt = '';
+      logoBtn.appendChild(logoImg);
+      logoBtn.appendChild(util.el('span', 'tnb-logo-fb', side === 'blue' ? '蓝' : '红'));
+      if (t.logo) { logoImg.src = t.logo; logoBtn.classList.add('has-logo'); }
+
+      var file = document.createElement('input');
+      file.type = 'file';
+      file.accept = 'image/*';
+      file.className = 'tnb-file';
+      file.addEventListener('change', function () {
+        var f = file.files && file.files[0];
+        file.value = '';
+        if (!f) return;
+        readTeamLogo(f).then(function (dataUrl) {
+          setTeamLogo(side, dataUrl);
+          logoImg.src = dataUrl;
+          logoBtn.classList.add('has-logo');
+          toast('已设置' + (side === 'blue' ? '蓝' : '红') + '方战队头像', 'ok');
+        }).catch(function (err) {
+          toast('头像读取失败：' + (err && err.message ? err.message : err), 'err');
+        });
+      });
+      logoBtn.addEventListener('click', function () { file.click(); });
+
+      /* 右键/长按清空：用一个小的清除按钮更直观 */
+      var logoClear = util.el('span', 'tnb-logo-x', '×');
+      logoClear.title = '清除头像';
+      logoClear.addEventListener('click', function (ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        setTeamLogo(side, '');
+        logoImg.removeAttribute('src');
+        logoBtn.classList.remove('has-logo');
+      });
+      logoBtn.appendChild(logoClear);
+
+      wrap.appendChild(logoBtn);
+      wrap.appendChild(file);
       wrap.appendChild(util.el('span', 'tnb-tag', side === 'blue' ? '蓝' : '红'));
+
       var input = util.el('input', 'tnb-input');
       input.type = 'text';
       input.maxLength = 24;
@@ -294,6 +340,50 @@ window.WZ = window.WZ || {};
     host.hidden = false;
   }
   app.buildTeamNameBar = buildTeamNameBar;
+
+  /* 把图片缩到最长边 128px 的 PNG/JPEG dataURL。
+     不缩的话一张手机照片能到 3MB，localStorage 直接爆（限额约 5MB）。 */
+  function readTeamLogo(file) {
+    return new Promise(function (resolve, reject) {
+      if (!/^image\//.test(file.type || '')) { reject(new Error('不是图片文件')); return; }
+      var reader = new FileReader();
+      reader.onerror = function () { reject(new Error('读取文件失败')); };
+      reader.onload = function () {
+        var img = new Image();
+        img.onerror = function () { reject(new Error('图片解不开')); };
+        img.onload = function () {
+          try {
+            var MAX = 128;
+            var w = img.naturalWidth || img.width;
+            var h = img.naturalHeight || img.height;
+            if (!w || !h) { reject(new Error('图片尺寸为 0')); return; }
+            var scale = Math.min(1, MAX / Math.max(w, h));
+            var cw = Math.max(1, Math.round(w * scale));
+            var ch = Math.max(1, Math.round(h * scale));
+            var cv = document.createElement('canvas');
+            cv.width = cw; cv.height = ch;
+            var ctx = cv.getContext('2d');
+            /* 透明底图先铺一层深色，否则 PNG 透明处会变黑块 */
+            ctx.fillStyle = 'rgba(0,0,0,0)';
+            ctx.clearRect(0, 0, cw, ch);
+            ctx.drawImage(img, 0, 0, cw, ch);
+            resolve(cv.toDataURL('image/png'));
+          } catch (e) { reject(e); }
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function setTeamLogo(side, dataUrl) {
+    if (!WZ.story || typeof WZ.story.setTeam !== 'function') return;
+    WZ.story.setTeam(side, { logo: String(dataUrl || '') });
+    pushTeamNames();
+    broadcastOverlayToCollectors();
+    broadcastSnapshot('update');
+  }
+  app.setTeamLogo = setTeamLogo;
 
   function buildModeSwitch() {
     dom.modeSwitch.innerHTML = '';
@@ -507,7 +597,8 @@ window.WZ = window.WZ || {};
       heroCount: heroes.length,
       timer: { total: timer.total, left: timer.left, running: timer.running },
       /* 战队名：展示窗也要显示（直播画面上「蓝方是哪支队」） */
-      teamNames: currentTeamNames(),
+      teamNames: { blue: (currentTeams().blue.name), red: (currentTeams().red.name) },
+      teams: currentTeams(),
       /* 赛事面板数据：采集窗上线时一并补齐 */
       story: (WZ.story && typeof WZ.story.get === 'function') ? WZ.story.get() : null,
       present: manualFocus ? {
@@ -519,24 +610,36 @@ window.WZ = window.WZ || {};
     };
   }
 
-  /* 战队名统一从「赛前面板」的蓝/红队名取，避免两处各填一份对不上 */
-  function currentTeamNames() {
+  /* 队伍信息（名字 + 头像）统一从「赛前面板」取，避免两处各填一份对不上 */
+  function currentTeams() {
     try {
       var d = WZ.story && WZ.story.get ? WZ.story.get() : null;
       var pre = (d && d.pre) || {};
+      var b = pre.blue || {}, r = pre.red || {};
       return {
-        blue: (pre.blue && pre.blue.name) || '',
-        red: (pre.red && pre.red.name) || ''
+        blue: { name: b.name || '', logo: b.logo || '' },
+        red: { name: r.name || '', logo: r.logo || '' }
       };
     } catch (e) {
-      return { blue: '', red: '' };
+      return { blue: { name: '', logo: '' }, red: { name: '', logo: '' } };
     }
   }
 
-  /* 把战队名刷到展示板上（控制窗与展示窗都会调） */
-  function pushTeamNames(names) {
-    if (!WZ.board || typeof WZ.board.setTeamNames !== 'function') return;
-    WZ.board.setTeamNames(names || currentTeamNames());
+  /* 把战队名 + 头像刷到展示板上（控制窗与展示窗都会调） */
+  function pushTeamNames(teams) {
+    if (!WZ.board) return;
+    var t = teams || currentTeams();
+    /* 只传了名字（老调用方）时补齐头像，别把头像抹掉 */
+    if (t && (typeof t.blue === 'string' || typeof t.red === 'string')) {
+      var full = currentTeams();
+      full.blue.name = String(t.blue || '');
+      full.red.name = String(t.red || '');
+      t = full;
+    }
+    if (typeof WZ.board.setTeams === 'function') WZ.board.setTeams(t);
+    else if (typeof WZ.board.setTeamNames === 'function') {
+      WZ.board.setTeamNames({ blue: (t.blue && t.blue.name) || '', red: (t.red && t.red.name) || '' });
+    }
   }
 
   /* 快速改战队名：直接写进赛前面板的数据（唯一数据源），两处界面同步更新 */
@@ -591,13 +694,17 @@ window.WZ = window.WZ || {};
           WZ.board.showHero(h, manualFocus.slotLabel, manualFocus.side, manualFocus.skinIndex);
         }
       }
-      /* 战队名：载荷里带了就用载荷的（展示窗本地没有 story 编辑权） */
-      if (payload.teamNames) {
+      /* 战队名 + 头像：载荷里带了就用载荷的（展示窗本地没有编辑权） */
+      if (payload.teams) {
+        pushTeamNames(payload.teams);
+      } else if (payload.teamNames) {
         pushTeamNames(payload.teamNames);
       } else if (payload.story && payload.story.pre) {
         pushTeamNames({
-          blue: (payload.story.pre.blue && payload.story.pre.blue.name) || '',
-          red: (payload.story.pre.red && payload.story.pre.red.name) || ''
+          blue: { name: (payload.story.pre.blue && payload.story.pre.blue.name) || '',
+                  logo: (payload.story.pre.blue && payload.story.pre.blue.logo) || '' },
+          red: { name: (payload.story.pre.red && payload.story.pre.red.name) || '',
+                 logo: (payload.story.pre.red && payload.story.pre.red.logo) || '' }
         });
       }
       setDisplaySync('已同步 · ' + (draft.state() ? draft.state().progress : 0) + ' 步');
