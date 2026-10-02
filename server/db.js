@@ -80,6 +80,51 @@ function loadMysql() {
   return mysql;
 }
 
+/* ---------------- v3 幂等迁移（契约 §2.1） ---------------- */
+
+/* 老库（v2）没有这三列。MariaDB 支持 ADD COLUMN IF NOT EXISTS，MySQL 8 不支持，
+   所以统一走「先查 information_schema 再决定 ALTER」——两边都能跑，重复启动不报错。
+   ddl 里不带 IF NOT EXISTS，正是为了在老库上真的执行、在新库上被跳过。 */
+const V3_COLUMNS = [
+  { table: 'rooms', column: 'launched',     ddl: 'ALTER TABLE `rooms` ADD COLUMN `launched` TINYINT(1) NOT NULL DEFAULT 0' },
+  { table: 'rooms', column: 'turn_seconds', ddl: 'ALTER TABLE `rooms` ADD COLUMN `turn_seconds` INT NOT NULL DEFAULT 60' },
+  { table: 'rooms', column: 'paused',       ddl: 'ALTER TABLE `rooms` ADD COLUMN `paused` TINYINT(1) NOT NULL DEFAULT 0' }
+];
+
+/* 已有动作的老房间补 launched=1（契约 §2.1）：
+   否则老库升上来之后，历史房间会因为「未开局」而突然不能继续打。
+   语句幂等：第二次跑 affectedRows 为 0。 */
+const V3_BACKFILL =
+  'UPDATE `rooms` r SET r.`launched` = 1 WHERE r.`launched` = 0 AND EXISTS (' +
+  'SELECT 1 FROM `actions` a JOIN `series` s ON s.`id` = a.`series_id` WHERE s.`room_id` = r.`id`)';
+
+let lastMigration = { added: [], backfilled: 0, driver: 'mysql', at: 0 };
+
+async function migrateToV3(conn) {
+  const added = [];
+  for (let i = 0; i < V3_COLUMNS.length; i++) {
+    const col = V3_COLUMNS[i];
+    const rows = await conn.query(
+      'SELECT COUNT(*) AS n FROM information_schema.columns ' +
+      'WHERE table_schema = ? AND table_name = ? AND column_name = ?',
+      [config.db.name, col.table, col.column]
+    );
+    const n = Number(rows[0][0] && rows[0][0].n) || 0;
+    if (n > 0) continue;                    // 列已存在 → 跳过（幂等的关键）
+    await conn.query(col.ddl);
+    added.push(col.table + '.' + col.column);
+  }
+  const res = await conn.query(V3_BACKFILL);
+  const backfilled = Number(res[0] && res[0].affectedRows) || 0;
+
+  lastMigration = { added, backfilled, driver: 'mysql', at: Date.now() };
+  if (added.length || backfilled) {
+    console.log('[db] v3 迁移：' + (added.length ? '新增列 ' + added.join('、') : '无需加列') +
+      (backfilled ? '；为 ' + backfilled + ' 个已有动作的历史房间补 launched=1' : ''));
+  }
+  return lastMigration;
+}
+
 /* ---------------- 初始化 ---------------- */
 
 async function init() {
@@ -91,12 +136,20 @@ async function init() {
     await memory.init();
     healthy = true;
     booting = false;
+    lastMigration = { added: [], backfilled: 0, driver: 'memory', at: Date.now() };
     console.warn('[db] 警告：当前使用**内存驱动**（WZBP_DB_DRIVER=memory），数据不落库、重启即清空，仅供自检。');
     return;
   }
 
   const m = loadMysql();
   const { host, port, user, password, name } = config.db;
+
+  /* 重复 init（自检脚本会连跑两次验证「迁移幂等」）时先收掉旧连接池，避免泄漏 */
+  if (pool) {
+    const old = pool;
+    pool = null;
+    try { await old.end(); } catch (e) { /* 忽略 */ }
+  }
 
   /* 1) 先用「不指定库」的连接建库（首次部署时库还不存在） */
   let boot = null;
@@ -122,6 +175,16 @@ async function init() {
     try { await boot.end(); } catch (e2) { /* 忽略 */ }
     booting = false;
     fatal('建库建表失败（schema.sql 执行出错），请确认账号有 CREATE 权限。', e);
+  }
+
+  /* 1.5) v3 幂等迁移：老库加列 + 历史房间补 launched（可重复执行） */
+  try {
+    await migrateToV3(boot);
+  } catch (e) {
+    try { await boot.end(); } catch (e2) { /* 忽略 */ }
+    booting = false;
+    fatal('v3 迁移失败（老库升级 rooms.launched / turn_seconds / paused 出错），' +
+      '请确认账号有 ALTER 权限。', e);
   }
 
   try { await boot.end(); } catch (e) { /* 忽略 */ }
@@ -209,5 +272,8 @@ module.exports = {
   isHealthy,
   close,
   splitStatements,
-  SCHEMA_PATH
+  SCHEMA_PATH,
+  /* 自检用：最近一次 init() 的迁移结果（新增了哪些列、回填了几个房间） */
+  migration() { return Object.assign({}, lastMigration, { added: lastMigration.added.slice() }); },
+  V3_COLUMNS
 };

@@ -3,6 +3,11 @@
 -- 可重复执行：全部 IF NOT EXISTS。
 -- 手工导入：mysql -uroot -p < server/schema.sql
 -- 服务端启动时会自动执行本文件（db.js 会按 WZBP_DB_NAME 改写库名）。
+--
+-- v3：rooms 多三列（launched / turn_seconds / paused），新增 room_admins /
+--     admin_tokens 两张表。本文件的 CREATE TABLE IF NOT EXISTS 只能建新表，
+--     **老库加列走 db.js 的幂等迁移**（查 information_schema 再 ALTER，
+--     MariaDB 与 MySQL 8 都吃得下，重复启动不报错）。
 -- ============================================================
 
 CREATE DATABASE IF NOT EXISTS `wzbp` DEFAULT CHARACTER SET utf8mb4;
@@ -19,9 +24,36 @@ CREATE TABLE IF NOT EXISTS rooms (
   status        VARCHAR(16)  NOT NULL DEFAULT 'waiting',
   current_game  INT          NOT NULL DEFAULT 1,
   order_json    JSON         NULL,
+  launched      TINYINT(1)   NOT NULL DEFAULT 0,   -- v3：管理员是否已开局
+  turn_seconds  INT          NOT NULL DEFAULT 60,  -- v3：每步倒计时秒数，0=不限时
+  paused        TINYINT(1)   NOT NULL DEFAULT 0,   -- v3：管理员暂停
   created_at    DATETIME(3)  NOT NULL,
   updated_at    DATETIME(3)  NOT NULL,
   INDEX idx_status_updated (status, updated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 管理员账号（v3 新增；密码只存 scrypt 哈希，绝不存明文）
+CREATE TABLE IF NOT EXISTS room_admins (
+  id           BIGINT PRIMARY KEY AUTO_INCREMENT,
+  room_id      BIGINT      NOT NULL,
+  username     VARCHAR(20) NOT NULL,
+  pass_hash    VARCHAR(255) NOT NULL,             -- scrypt$N$r$p$salt$hash
+  is_owner     TINYINT(1)  NOT NULL DEFAULT 0,
+  created_at   DATETIME(3) NOT NULL,
+  UNIQUE KEY uk_room_user (room_id, username),
+  INDEX idx_room (room_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 管理员登录令牌（v3 新增；只存哈希，12 小时过期）
+CREATE TABLE IF NOT EXISTS admin_tokens (
+  id          BIGINT PRIMARY KEY AUTO_INCREMENT,
+  room_id     BIGINT      NOT NULL,
+  admin_id    BIGINT      NOT NULL,
+  token_hash  CHAR(64)    NOT NULL,               -- sha256(token) 的 hex
+  expires_at  DATETIME(3) NOT NULL,
+  created_at  DATETIME(3) NOT NULL,
+  UNIQUE KEY uk_token (token_hash),
+  INDEX idx_room (room_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 房间成员（每队最多 5 人）

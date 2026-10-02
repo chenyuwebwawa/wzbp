@@ -1,8 +1,8 @@
 # wzbp 联网版 · 接口与数据契约（冻结）
 
 > 本文件是**前后端并行开发的唯一契约**。任何一方改动都必须同步改这里，并在消息里说明。
-> 版本：**v2**（2026-10-02 更新：kpl 赛制改为 B2P3→B3P2、新增全局 BP 池、错误码表、若干裁决）
-> v2 变更摘要见文末[附录 A](#附录-av1--v2-变更)。
+> 版本：**v3**（2026-10-02 第三轮：管理员账号制、组队→开局流程、自动计时、全局 BP 记录）
+> 变更摘要见文末[附录 A](#附录-av1--v2-变更) 与 [附录 B](#附录-bv2--v3-变更)。
 
 ---
 
@@ -39,17 +39,57 @@
 -- 房间
 CREATE TABLE rooms (
   id            BIGINT PRIMARY KEY AUTO_INCREMENT,
-  code          VARCHAR(12)  NOT NULL UNIQUE,      -- 6 位房间号（大写字母+数字，去掉易混字符）
+  code          VARCHAR(12)  NOT NULL UNIQUE,      -- 6 位房间号
   name          VARCHAR(80)  NOT NULL DEFAULT '',
   mode          VARCHAR(24)  NOT NULL DEFAULT 'ranked',  -- ranked | kpl | peak | random
-  series_count  INT          NOT NULL DEFAULT 1,   -- 系列赛局数（BO N），1..9
+  series_count  INT          NOT NULL DEFAULT 1,   -- BO几：打几局
   status        VARCHAR(16)  NOT NULL DEFAULT 'waiting', -- waiting | drafting | finished
-  current_game  INT          NOT NULL DEFAULT 1,   -- 当前第几局
-  order_json    JSON         NULL,                 -- 本局顺序蓝图；NULL=按内置赛制
+  current_game  INT          NOT NULL DEFAULT 1,
+  order_json    JSON         NULL,
+  launched      TINYINT(1)   NOT NULL DEFAULT 0,   -- v3：管理员是否已开局
+  turn_seconds  INT          NOT NULL DEFAULT 60,  -- v3：每步倒计时秒数，0=不限时
+  paused        TINYINT(1)   NOT NULL DEFAULT 0,   -- v3：管理员暂停
   created_at    DATETIME(3)  NOT NULL,
   updated_at    DATETIME(3)  NOT NULL,
   INDEX idx_status_updated (status, updated_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 管理员账号（v3 新增；密码只存 scrypt 哈希，绝不存明文）
+CREATE TABLE room_admins (
+  id           BIGINT PRIMARY KEY AUTO_INCREMENT,
+  room_id      BIGINT      NOT NULL,
+  username     VARCHAR(20) NOT NULL,
+  pass_hash    VARCHAR(255) NOT NULL,             -- scrypt$N$r$p$salt$hash
+  is_owner     TINYINT(1)  NOT NULL DEFAULT 0,
+  created_at   DATETIME(3) NOT NULL,
+  UNIQUE KEY uk_room_user (room_id, username),
+  INDEX idx_room (room_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 管理员登录令牌（v3 新增；只存哈希，12 小时过期）
+CREATE TABLE admin_tokens (
+  id          BIGINT PRIMARY KEY AUTO_INCREMENT,
+  room_id     BIGINT      NOT NULL,
+  admin_id    BIGINT      NOT NULL,
+  token_hash  CHAR(64)    NOT NULL,               -- sha256(token) 的 hex
+  expires_at  DATETIME(3) NOT NULL,
+  created_at  DATETIME(3) NOT NULL,
+  UNIQUE KEY uk_token (token_hash),
+  INDEX idx_room (room_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+```
+
+### 2.1 从 v2 库平滑升级（必做）
+
+用 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` 风格的**幂等迁移**（MariaDB 支持 `IF NOT EXISTS`，
+MySQL 8 不支持则先查 `information_schema.columns` 再决定是否 ALTER），在 `db.init()` 里执行：
+
+- `rooms` 加 `launched`、`turn_seconds`、`paused` 三列（带默认值，老数据自动兼容）
+- 新建 `room_admins`、`admin_tokens` 两张表（`CREATE TABLE IF NOT EXISTS`）
+
+**注意**：老库升级后，已有房间 `launched=0` → 不能被落子。迁移时要对**已有 `actions` 的房间**
+把 `launched` 置为 1（否则历史房间会突然不能继续打）。
+
 
 -- 房间成员（每队最多 5 人）
 CREATE TABLE players (
@@ -117,27 +157,60 @@ HTTP 状态码同时反映结果（400/403/404/409/500）。
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/health` | `{ ok, version, time, db: true\|false }`，前端用它判断联网模式 |
-| POST | `/api/rooms` | 建房。body `{ name, mode, seriesCount, nickname, playerKey }` → `{ ok, room }` |
-| GET | `/api/rooms` | 房间列表 `{ ok, rooms: [{code,name,mode,status,players,createdAt}] }`（最多 50 个，按 updated_at 倒序） |
+| POST | `/api/rooms` | **建房（仅管理员）**。body `{ name, mode, seriesCount, turnSeconds, adminUser, adminPass }` → `{ ok, room, adminToken }` |
+| POST | `/api/rooms/:code/admin-login` | 管理员登录。body `{ adminUser, adminPass }` → `{ ok, adminToken, room }` |
+| POST | `/api/rooms/:code/admin-logout` | 退出管理员。body `{ adminToken }` → `{ ok }` |
+| POST | `/api/rooms/:code/launch` | **管理员开局**（进入 BP）。body `{ adminToken }` → `{ ok, game }` |
+| POST | `/api/rooms/:code/pause` | 暂停/继续（可选，管理员）。body `{ adminToken, paused }` → `{ ok }` |
+| GET | `/api/rooms` | 房间列表 `{ ok, rooms: [{code,name,mode,status,players,playerCount,members,launched,createdAt}] }`（最多 50，按 updated_at 倒序） |
 | POST | `/api/rooms/:code/join` | 入房。body `{ nickname, playerKey, team, slot? }` `team` = blue\|red\|auto → `{ ok, room, me }` |
 | POST | `/api/rooms/:code/leave` | 离房。body `{ playerKey }` → `{ ok }` |
-| GET | `/api/rooms/:code/state` | 全量状态 → `{ ok, room, players, series, game, actions, me }`（见 §4） |
+| GET | `/api/rooms/:code/state` | 全量状态 → `{ ok, room, players, series, game, actions, me, admin }`（见 §4） |
 | GET | `/api/stream?code=XXXX&playerKey=...` | **SSE** 事件流（见 §5） |
-| POST | `/api/rooms/:code/shuffle` | 重新随机本局顺序（仅 mode=random 有意义）→ `{ ok, order }` |
+| POST | `/api/rooms/:code/shuffle` | 重新随机本局顺序（仅 mode=random）→ `{ ok, order }` |
 | POST | `/api/rooms/:code/action` | 落一手。body `{ playerKey, side, action, heroId }` → `{ ok, action, game }` |
-| POST | `/api/rooms/:code/undo` | 撤销上一手。body `{ playerKey }` → `{ ok, removed }` |
+| POST | `/api/rooms/:code/undo` | 撤销上一手。body `{ playerKey, adminToken? }` → `{ ok, removed }` |
 | POST | `/api/rooms/:code/next-game` | 结束本局、开下一局（超过 seriesCount 则整场结束）。body `{ winner?, playerKey }` → `{ ok, game }` |
 | POST | `/api/rooms/:code/finish` | 直接结束整个系列。body `{ playerKey }` → `{ ok }` |
 | GET | `/api/rooms/:code/history` | 历史对局列表 → `{ ok, games: [...] }` |
 | GET | `/api/games/:id/replay` | 回放数据 → `{ ok, game, actions: [...], order: [...] }` |
 | GET | `/api/games/recent` | 最近对局（跨房间，最多 30 条）→ `{ ok, games: [...] }` |
 
+### 3.0 房间生命周期（v3 核心流程）
+
+```
+① 管理员建房          POST /api/rooms           → 拿到房间号 + adminToken
+② 队员「加入队伍」     POST /rooms/:code/join    → 自己选蓝/红、点席位坐下
+   （此时房间里只能看席位，不能 BP）
+③ 管理员点「开始 BP」  POST /rooms/:code/launch  → 生成/确定本局顺序，status=drafting
+④ 按王者征召顺序轮流   POST /rooms/:code/action   → 每步自动计时（见 §6.4）
+⑤ 一局打完            POST /rooms/:code/next-game → 下一局（全局池累计；默认保留全局BP记录）
+⑥ 打满 seriesCount 局 → 整场结束，可看战绩与回放
+```
+
+**关键约束**：
+- **未 `launch` 之前不能落子**（服务端 409 `ERR_NOT_LAUNCHED`）。这一步就是「管理员开启房间之后开始 BP」。
+- `launch` 只有持有效 `adminToken` 的人能调（403 `ERR_NOT_ADMIN`）。
+- 管理员**不必占用席位**，可以是教练/裁判；也可以自己坐一个位置。
+- 队员可以不登录账号（昵称即可）；**管理员是唯一需要账号的角色**。
+
+### 3.0.1 管理员账号
+
+- 建房时创建：`adminUser`（3..20 字符，同房间内唯一，只需字母数字下划线）+ `adminPass`（6..64 字符）。
+- 密码用 **`node:crypto` 的 `scrypt`** 加盐哈希后存 `bcrypt` 风格的 `scrypt$N$r$p$salt$hash` 字符串，**绝不存明文**。
+- 登录成功返回 `adminToken`（随机 32 字节 hex，存库并带过期时间，默认 12 小时）。
+- 一个房间可有多个管理员（同一房间 `adminUser` 唯一）；不同房间可以有同名管理员。
+- 所有管理动作都带 `adminToken` 校验；token 过期需重新登录。
+
 ### 3.1 建房参数校验
 
 - `mode` ∈ `ranked | kpl | peak | random`，非法则 400。
-- `seriesCount` 1..9，非法则 400。
+- `seriesCount` 1..9（BO几就打几局），非法则 400。
+- `turnSeconds` 每步倒计时秒数，30..300，默认 **60**；`0` 表示不限时（不倒计时）。
 - `nickname` 1..20 字符（去首尾空白），空则用「玩家+4位随机」。
+- `adminUser` 3..20 字符 `[A-Za-z0-9_]+`；`adminPass` 6..64 字符。建房时必填。
 - `code` 生成：6 位，字符集 `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`（去掉 I/O/0/1）；冲突则重试，最多 10 次。
+
 
 ### 3.2 入房规则
 
@@ -154,14 +227,21 @@ HTTP 状态码与 `code` 一一对应：
 | HTTP | code | 含义 |
 | --- | --- | --- |
 | 400 | `ERR_BAD_MODE` / `ERR_BAD_SERIES` / `ERR_BAD_NICKNAME` / `ERR_BAD_SLOT` / `ERR_BAD_PARAM` / `ERR_BAD_JSON` | 参数不合法 |
+| 400 | `ERR_BAD_ADMIN_USER` / `ERR_BAD_ADMIN_PASS` / `ERR_BAD_TURN_SECONDS` | 管理员账号/密码/倒计时秒数格式不合法 |
+| 401 | **`ERR_BAD_CREDENTIALS`** | **管理员账号或密码不正确**（v3：账号不存在与密码错误统一用这个码、同一句文案，防账号探测） |
+| 401 | `ERR_BAD_TOKEN` | adminToken 无效或已过期 |
 | 403 | `ERR_NOT_IN_ROOM` | 请求方不在该房间（**优先于轮次判断**） |
+| 403 | `ERR_NOT_ADMIN` | 该操作只有管理员能做 |
 | 404 | `ERR_ROOM_NOT_FOUND` / `ERR_GAME_NOT_FOUND` / `ERR_HERO_UNKNOWN` | 找不到 |
 | 405 | `ERR_METHOD` | 方法不允许 |
-| 409 | `ERR_NOT_YOUR_TURN` / `ERR_WRONG_ACTION` / `ERR_HERO_TAKEN` / **`ERR_HERO_GLOBAL_USED`** / `ERR_TEAM_FULL` / `ERR_SLOT_TAKEN` / `ERR_GAME_DONE` / `ERR_ROOM_FINISHED` / `ERR_ALREADY_DONE` / `ERR_ALREADY_STARTED` / `ERR_NOTHING_TO_UNDO` / `ERR_NOT_RANDOM` | 状态冲突 |
+| 409 | `ERR_NOT_YOUR_TURN` / `ERR_WRONG_ACTION` / `ERR_HERO_TAKEN` / `ERR_HERO_GLOBAL_USED` / `ERR_TEAM_FULL` / `ERR_SLOT_TAKEN` / `ERR_GAME_DONE` / `ERR_ROOM_FINISHED` / `ERR_ALREADY_DONE` / `ERR_ALREADY_STARTED` / `ERR_NOTHING_TO_UNDO` / `ERR_NOT_RANDOM` / `ERR_ADMIN_EXISTS` | 状态冲突 |
+| 409 | **`ERR_NOT_LAUNCHED`** | **管理员还没点「开始 BP」**（v3 核心闸门） |
 | 413 | `ERR_BODY_TOO_LARGE` | 请求体过大 |
 | 500 | `ERR_INTERNAL` | 服务端异常 |
 
 `ERR_HERO_GLOBAL_USED` 的中文提示建议：`该英雄已被蓝方在之前的小局选用（全局 BP）`。
+`ERR_NOT_ADMIN` 建议：`这个操作只有管理员能做（请先用管理员账号登录）`。
+`ERR_NOT_LAUNCHED` 建议：`管理员还没有开启本局 BP（等管理员点「开始 BP」后再落子）`。
 
 ### 3.4 权限（v2 明确）
 
@@ -182,9 +262,13 @@ HTTP 状态码与 `code` 一一对应：
   "ok": true,
   "room": {
     "code": "A7K2M9", "name": "周五训练赛", "mode": "random",
-    "seriesCount": 3, "status": "drafting", "currentGame": 2,
+    "seriesCount": 3, "status": "waiting", "currentGame": 1,
+    "launched": false,          // v3：管理员是否已点「开始 BP」；false 时不能落子
+    "turnSeconds": 60,          // v3：每步倒计时秒数（0 = 不限时）
+    "paused": false,            // v3：管理员是否暂停
     "createdAt": "2026-10-02T13:00:00.000Z", "updatedAt": "..."
   },
+  "admin": { "you": true, "users": ["coach"] },   // v3：you=当前连接是否管理员；users=该房间管理员账号名（不含密码）
   "players": [
     { "nickname": "老王", "team": "blue", "slot": 0, "isMe": true, "online": true }
   ],
@@ -193,14 +277,19 @@ HTTP 状态码与 `code` 一一对应：
   "game": {
     "id": 12, "gameNo": 2, "status": "drafting",
     "stepIndex": 5,          // 已完成的蓝图步数（peak 的 both,n=3 会一步吃 6 手）
-    "actionsInStep": 0,      // 当前步骤内已出手数（v2 新增，peak 用得到）
+    "actionsInStep": 0,      // 当前步骤内已出手数（peak 用得到）
     "nextAction": { "side": "red", "action": "ban" },   // side 可能是 'both'
     "done": false,
     "bans": { "blue": [], "red": [] },     // 数组元素是 heroId
     "picks": { "blue": [], "red": [] },
-    "global": true,                        // v2 新增：本局是否全局 BP
-    "globalUsed": { "blue": [105], "red": [] },  // v2 新增：本系列赛各队已选英雄
-    "startedAt": "...", "finishedAt": null
+    "global": true,                        // 本局是否全局 BP
+    "globalUsed": { "blue": [105], "red": [] },  // 本系列赛各队已选英雄
+    "startedAt": "...", "finishedAt": null,
+    "turn": {                              // v3：自动计时状态（服务端算，权威）
+      "deadline": "2026-10-02T13:05:00.000Z",  // 本步截止时间（null = 不限时/已结束）
+      "remainingMs": 42350,                    // 剩余毫秒（服务端此刻计算）
+      "seconds": 60                            // 本步总秒数
+    }
   },
   "actions": [
     { "seq":1, "stepIndex":0, "side":"blue", "action":"ban", "heroId":105,
@@ -299,6 +388,48 @@ HTTP 状态码与 `code` 一一对应：
 - `ranked` 排位征召：6 ban + 10 pick = 16 手（蓝1 红2 蓝2 红1 → 交替选人）
 - `peak` 巅峰赛：`{s:'both',a:'ban',n:3}` 一步双方各 3 ban + 10 pick = 11 步
 
+### 6.4 自动计时（v3）
+
+**每一手开始（含开局第一手）服务端就设置本步的截止时间**，并随 `state.game.turn` 下发：
+
+| 字段 | 含义 |
+| --- | --- |
+| `turn.seconds` | 本步总秒数（来自 `room.turnSeconds`；0 表示不限时） |
+| `turn.deadline` | 本步截止的绝对时间（ISO 8601 UTC） |
+| `turn.remainingMs` | 服务端「此刻」计算的剩余毫秒数（客户端以它为准做本地倒计时） |
+
+规则：
+
+1. **不自动替玩家选**：到 0 只提示「超时」，不代替落子（避免误操作）。
+2. 落子成功后**立即重置**为下一步的完整秒数；换局、`launch`、`undo` 同样重置。
+3. 管理员 `pause` 时**冻结剩余时间**（`turn.deadline = null`，`remainingMs` 保持在暂停那一刻的值）；
+   **解除暂停时按剩余时间续上**（不是重新给满），这样暂停不会变成「白送时间」。
+4. 客户端**不要自己从 0 开始数**：用 `remainingMs` 起算 + 本地 `Date.now()` 推进，
+   每次收到 `state` 都以服务端值校准（避免各人电脑时钟不一致）。
+5. 展示窗 / 采集页的大屏倒计时也走这个值，保证所有人看到的秒数一致。
+
+> 说明：契约以本节为准（暂停按剩余续上）。task-9 描述里写的「取消暂停 → now + turnSeconds」
+> 作废，服务端已按本节实现并自检。
+
+
+### 6.5 全局 BP 记录（v3）
+
+- 「全局 BP 记录」= 本系列赛各队**已选过的英雄**（`globalUsed`），**跨局累计、换局不清空**。
+- 记录随 `state` 下发，界面上要在房间信息里能看到（例如「蓝方已用 3 / 红方已用 3」并列出）。
+- 英雄选择面板上，本方已用过的英雄要**标灰并禁用**（不是只在服务端拒绝）。
+- 一座房间的全局记录**随房间存在**；开新房重新开始。
+
+### 6.6 与王者征召一致的操作顺序（v3）
+
+BP 顺序完全由 `order` 蓝图决定（`ranked` 就是游戏内征召顺序）。
+界面上要保证「全流程顺畅」，即：
+
+1. 轮到谁，谁的操作区高亮；**不是自己回合时按钮直接禁用并说明原因**。
+2. 当前步骤的动作类型（ban/pick）与剩余数量在界面上明确可见。
+3. 每步倒计时与「第几手 / 共几手」始终可见。
+4. 落子失败必须给出中文原因（服务端返回的 `error` 直接展示，不要吞掉）。
+
+
 
 ---
 
@@ -380,4 +511,25 @@ server/
   仅在 `WZBP_DB_DRIVER=memory` 时加载，启动会打印告警；**生产路径不经它**。
 - 本机开发验证用的是免安装 **MariaDB 11.4.5**（MySQL 协议兼容）；
   初始化用 `mysql_install_db.exe`（**不是** MySQL 的 `--initialize-insecure`）。
+
+---
+
+## 附录 B：v2 → v3 变更
+
+| 项 | v2 | v3 |
+| --- | --- | --- |
+| 开房流程 | 任何人建房，进来就能落子 | **管理员建房** → 队员先加入队伍 → **管理员点「开始 BP」** → 才可落子 |
+| 管理员 | 无（谁都能换局/撤销） | **新增账号制**：`adminUser` + `adminPass`（scrypt 哈希），`adminToken` 12 小时 |
+| 落子前置 | 无需开局 | `room.launched` 为 false 时 409 `ERR_NOT_LAUNCHED` |
+| 计时 | 客户端手动点 30s/60s | **服务端权威自动计时**：每步下发 `turn.{deadline,remainingMs,seconds}`，`turnSeconds` 建房时配置 |
+| 全局 BP 记录 | 只在服务端池子里 | 明确「跨局累计、换局不清空」，且**界面上要能看到** |
+| 房间配置 | 只有模式与局数 | 增加 `turnSeconds`（每步秒数）；`seriesCount` 语义明确为「BO几」 |
+| 新错误码 | — | `ERR_NOT_ADMIN`(403)、`ERR_NOT_LAUNCHED`(409)、`ERR_BAD_ADMIN_USER`/`ERR_BAD_ADMIN_PASS`(400)、`ERR_ADMIN_EXISTS`(409)、`ERR_BAD_TOKEN`(401) |
+| 新表 | 4 张 | 6 张（+`room_admins`、`admin_tokens`），并需**幂等迁移**老库 |
+| 赛制标题 | 「全局 BP（B2P3 → B3P2）」 | 界面标题就叫「**全局 BP**」（规则细节放说明里，不占标题） |
+| `POST /api/rooms` 的 body | 未列 playerKey | `playerKey` **可选**：传了就自动坐蓝方 0 号位（响应给 `me`），不传就不占席位（管理员可以是教练/裁判） |
+| 登录失败错误码 | — | 统一 **401 `ERR_BAD_CREDENTIALS`**（账号不存在与密码错同码同文案，防探测） |
+| 暂停/继续语义 | 未定义 | 暂停**冻结**剩余时间；继续**按剩余续上**（不重新给满） |
+
+
 

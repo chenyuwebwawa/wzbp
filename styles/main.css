@@ -341,6 +341,20 @@ img.img-failed { visibility: hidden; }
 .hero-grid::-webkit-scrollbar-thumb { background: #2c3c58; border-radius: 6px; }
 .hero-grid::-webkit-scrollbar-thumb:hover { background: #3b5078; }
 
+/* v3：管理员还没开局时的 BP 锁（提示条 + 网格变暗，明确「不是坏了，是在等开局」） */
+#wzBpLockNote {
+  margin: 0 0 8px;
+  padding: 9px 12px;
+  border-radius: 9px;
+  border: 1px dashed #6b4a1c;
+  background: rgba(240, 166, 60, .1);
+  color: #ffd894;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.hero-grid.wz-bp-locked { opacity: .45; }
+.hero-grid.wz-bp-locked .hero-card { pointer-events: none; }
+
 /* 英雄卡 */
 .hero-card {
   position: relative;

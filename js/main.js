@@ -105,7 +105,7 @@ window.WZ = window.WZ || {};
        · 房间顺序（随机征召）通过 draft.setOrder() 注入引擎；
          全局 BP 池通过 draft.setGlobalUsed() 注入，UI 据此标灰。 */
 
-  var online = { active: false, code: null, lastState: null };
+  var online = { active: false, code: null, lastState: null, launched: false };
 
   function initOnline() {
     if (!WZ.net || typeof WZ.net.init !== 'function') return;
@@ -187,6 +187,15 @@ window.WZ = window.WZ || {};
 
     /* 3.5) 重放完再把全局池注回，UI 据此把「本方之前小局用过」的英雄标灰 */
     draft.setGlobalUsed(globalNow);
+
+    /* 4) v3：管理员没点「开始 BP」之前，本机所有操作都锁住
+          （服务端也会拒，这里锁住是为了让用户看得懂，而不是点了没反应） */
+    var launched = !!state.room.launched;
+    online.launched = launched;
+    if (WZ.ui.setLocked) {
+      WZ.ui.setLocked(online.active && online.code && !launched,
+        '等待管理员开始 BP —— 现在是「加入队伍」阶段，开局后才能 ban/pick');
+    }
 
     WZ.ui.syncTakenFlags();
     WZ.ui.syncActions();
@@ -364,6 +373,12 @@ window.WZ = window.WZ || {};
      ------------------------------------------------------------ */
   app.onAction = function (side, action, hero) {
     if (!hero) return;
+
+    /* v3：管理员没开局前一律不接（联网时服务端也会拒，这里给出人话提示） */
+    if (online.active && online.code && !online.launched) {
+      toast('还没开始 BP —— 等管理员点「开始 BP」（现在先加入队伍）', 'warn', 3600);
+      return;
+    }
 
     /* 联网且已在房间内：服务端是权威，本机只发请求，盘面等 SSE 回来重建 */
     if (online.active && online.code) {

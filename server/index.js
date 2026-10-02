@@ -186,6 +186,8 @@ function openStream(req, res, meta) {
     res,
     code: meta.code,
     playerKey: meta.playerKey || '',
+    /* v3：SSE 也认管理员令牌，这样 state.admin.you 能按连接个性化 */
+    adminToken: meta.adminToken || '',
     lastBeat: Date.now(),
     stalledSince: 0,
     closed: false
@@ -302,7 +304,7 @@ function corsHeaders(req) {
   return {
     'Access-Control-Allow-Origin': req.headers.origin || '*',
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, X-Player-Key',
+    'Access-Control-Allow-Headers': 'Content-Type, X-Player-Key, X-Admin-Token',
     'Vary': 'Origin'
   };
 }

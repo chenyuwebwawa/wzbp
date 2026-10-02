@@ -15,6 +15,11 @@
          连落一整局 → 重复英雄/越权/错轮次/错动作/未知英雄 → 撤销 →
          换局 → 历史 → 回放（gapMs 非负、首手为距开局）→ SSE(hello/state/action) →
          随机洗牌约束 → 静态文件与路径穿越防护。
+   v3 追加：管理员账号（scrypt 哈希 + adminToken）→ 未开局落子被拒（ERR_NOT_LAUNCHED）→
+         非管理员 launch 被拒（ERR_NOT_ADMIN/ERR_BAD_TOKEN）→ 登录失败统一 401 ERR_BAD_CREDENTIALS
+         （账号不存在与密码错同码同文案）→ 管理员开局 → 服务端权威自动计时
+         （turn.deadline/remainingMs、落子后重置、暂停冻结/续上、到 0 不代打）→
+         老库幂等迁移（连跑两次 init、已有动作的房间回填 launched=1）。
    ============================================================ */
 
 import http from 'node:http';
@@ -132,9 +137,10 @@ function rawRequest(method, rawPath) {
 
 /* ---------------- SSE 客户端 ---------------- */
 
-function openSse(code, playerKey) {
+function openSse(code, playerKey, adminToken) {
   const u = new URL('/api/stream?code=' + encodeURIComponent(code) +
-    (playerKey ? '&playerKey=' + encodeURIComponent(playerKey) : ''), BASE);
+    (playerKey ? '&playerKey=' + encodeURIComponent(playerKey) : '') +
+    (adminToken ? '&adminToken=' + encodeURIComponent(adminToken) : ''), BASE);
   const events = [];
   let buffer = '';
   const state = { headers: null, closed: false };
@@ -233,6 +239,42 @@ async function runSuite() {
 
   const heroIds = loadHeroIds();
 
+  /* ------------------------------------------------------------
+     v3：建房现在必须带管理员账号（adminUser 3..20 位字母数字下划线，adminPass 6..64），
+     而且「未开局不能落子」——凡是建完就要落子的房，都顺手让建房时拿到的 adminToken 开局。
+     autoLaunch=false 用于只检查蓝图/大厅的房。
+     ------------------------------------------------------------ */
+  let adminSeq = 0;
+  function adminCreds() {
+    adminSeq += 1;
+    return {
+      adminUser: 'vadmin' + Date.now().toString(36) + adminSeq,
+      adminPass: 'vpass-' + Date.now() + '-' + adminSeq
+    };
+  }
+
+  async function newRoom(body, opts) {
+    opts = opts || {};
+    const payload = Object.assign({ seriesCount: 1 }, body || {});
+    if (!payload.adminUser || !payload.adminPass) {
+      const c = adminCreds();
+      payload.adminUser = c.adminUser;
+      payload.adminPass = c.adminPass;
+    }
+    const res = await api('POST', '/api/rooms', payload);
+    const out = {
+      res,
+      code: (res.json && res.json.room && res.json.room.code) || '',
+      token: (res.json && res.json.adminToken) || '',
+      adminUser: payload.adminUser,
+      adminPass: payload.adminPass
+    };
+    if (res.json && res.json.ok && opts.autoLaunch !== false) {
+      out.launch = await api('POST', '/api/rooms/' + out.code + '/launch', { adminToken: out.token });
+    }
+    return out;
+  }
+
   /* ---------- 1. health ---------- */
   group('1. /api/health 探活');
   const health = await api('GET', '/api/health');
@@ -246,41 +288,72 @@ async function runSuite() {
   console.log('    （英雄白名单 heroList=' + heroListOk + '，heroCount=' + (health.json && health.json.heroCount) + '）');
 
   /* ---------- 2. 建房参数校验 ---------- */
-  group('2. 建房参数校验（契约 §3.1）');
-  const badMode = await api('POST', '/api/rooms', { name: 'x', mode: 'nope', seriesCount: 1, nickname: 'a', playerKey: P1 });
+  group('2. 建房参数校验（契约 §3.1 / v3 管理员）');
+  const a0 = adminCreds();
+  const badMode = await api('POST', '/api/rooms', { name: 'x', mode: 'nope', seriesCount: 1, nickname: 'a', playerKey: P1, adminUser: a0.adminUser, adminPass: a0.adminPass });
   checkEq('非法 mode → 400', badMode.status, 400);
   checkEq('非法 mode → ERR_BAD_MODE', badMode.json && badMode.json.code, 'ERR_BAD_MODE');
-  const badSeries0 = await api('POST', '/api/rooms', { mode: 'ranked', seriesCount: 0, nickname: 'a', playerKey: P1 });
+  const badSeries0 = await api('POST', '/api/rooms', { mode: 'ranked', seriesCount: 0, nickname: 'a', playerKey: P1, adminUser: a0.adminUser, adminPass: a0.adminPass });
   checkEq('seriesCount=0 → 400', badSeries0.status, 400);
-  const badSeries10 = await api('POST', '/api/rooms', { mode: 'ranked', seriesCount: 10, nickname: 'a', playerKey: P1 });
+  const badSeries10 = await api('POST', '/api/rooms', { mode: 'ranked', seriesCount: 10, nickname: 'a', playerKey: P1, adminUser: a0.adminUser, adminPass: a0.adminPass });
   checkEq('seriesCount=10 → 400', badSeries10.status, 400);
-  const noKey = await api('POST', '/api/rooms', { mode: 'ranked', seriesCount: 1, nickname: 'a' });
-  checkEq('缺 playerKey → 400', noKey.status, 400);
-  const longNick = await api('POST', '/api/rooms', { mode: 'ranked', seriesCount: 1, nickname: 'x'.repeat(21), playerKey: P1 });
+  /* v3：管理员账号必填 */
+  const noAdminUser = await api('POST', '/api/rooms', { mode: 'ranked', seriesCount: 1, nickname: 'a', playerKey: P1, adminPass: a0.adminPass });
+  checkEq('缺 adminUser → 400', noAdminUser.status, 400);
+  checkEq('缺 adminUser → ERR_BAD_ADMIN_USER', noAdminUser.json && noAdminUser.json.code, 'ERR_BAD_ADMIN_USER');
+  const shortAdminUser = await api('POST', '/api/rooms', { mode: 'ranked', seriesCount: 1, playerKey: P1, adminUser: 'ab', adminPass: a0.adminPass });
+  checkEq('adminUser 只有 2 位 → 400', shortAdminUser.status, 400);
+  const badAdminUserChar = await api('POST', '/api/rooms', { mode: 'ranked', seriesCount: 1, playerKey: P1, adminUser: '教练甲', adminPass: a0.adminPass });
+  checkEq('adminUser 含非字母数字下划线 → 400', badAdminUserChar.status, 400);
+  const noAdminPass = await api('POST', '/api/rooms', { mode: 'ranked', seriesCount: 1, playerKey: P1, adminUser: a0.adminUser });
+  checkEq('缺 adminPass → 400', noAdminPass.status, 400);
+  checkEq('缺 adminPass → ERR_BAD_ADMIN_PASS', noAdminPass.json && noAdminPass.json.code, 'ERR_BAD_ADMIN_PASS');
+  const shortPass = await api('POST', '/api/rooms', { mode: 'ranked', seriesCount: 1, playerKey: P1, adminUser: a0.adminUser, adminPass: '12345' });
+  checkEq('密码只有 5 位 → 400', shortPass.status, 400);
+  /* v3：turnSeconds 校验（30..300 或 0） */
+  const badTurn = await api('POST', '/api/rooms', { mode: 'ranked', seriesCount: 1, playerKey: P1, adminUser: a0.adminUser, adminPass: a0.adminPass, turnSeconds: 10 });
+  checkEq('turnSeconds=10 → 400', badTurn.status, 400);
+  checkEq('turnSeconds=10 → ERR_BAD_TURN_SECONDS', badTurn.json && badTurn.json.code, 'ERR_BAD_TURN_SECONDS');
+  const badTurn2 = await api('POST', '/api/rooms', { mode: 'ranked', seriesCount: 1, playerKey: P1, adminUser: a0.adminUser, adminPass: a0.adminPass, turnSeconds: 301 });
+  checkEq('turnSeconds=301 → 400', badTurn2.status, 400);
+  /* v3：playerKey 变成可选（管理员可以不占席位），传了才自动坐蓝方 0 号位 */
+  const noPlayerKey = await api('POST', '/api/rooms', { mode: 'ranked', seriesCount: 1, adminUser: a0.adminUser, adminPass: a0.adminPass });
+  checkEq('不传 playerKey 也能建房 → 200', noPlayerKey.status, 200);
+  checkEq('不占席位时 me=null', noPlayerKey.json && noPlayerKey.json.me, null);
+  checkEq('不占席位时 room.players 为空', noPlayerKey.json && noPlayerKey.json.room.players.length, 0);
+  check('建房返回 adminToken（64 位 hex = 32 字节）',
+    /^[0-9a-f]{64}$/.test(String(noPlayerKey.json && noPlayerKey.json.adminToken)));
+  const longNick = await api('POST', '/api/rooms', { mode: 'ranked', seriesCount: 1, nickname: 'x'.repeat(21), playerKey: P1, adminUser: a0.adminUser, adminPass: a0.adminPass });
   checkEq('昵称超过 20 字 → 400', longNick.status, 400);
-  const fracSeries = await api('POST', '/api/rooms', { mode: 'ranked', seriesCount: 1.5, nickname: 'a', playerKey: P1 });
+  const fracSeries = await api('POST', '/api/rooms', { mode: 'ranked', seriesCount: 1.5, nickname: 'a', playerKey: P1, adminUser: a0.adminUser, adminPass: a0.adminPass });
   checkEq('seriesCount 非整数 → 400', fracSeries.status, 400);
-  const autoNick = await api('POST', '/api/rooms', { mode: 'ranked', seriesCount: 1, nickname: '   ', playerKey: P1 });
+  const autoNick = await api('POST', '/api/rooms', { mode: 'ranked', seriesCount: 1, nickname: '   ', playerKey: P1, adminUser: a0.adminUser, adminPass: a0.adminPass });
   check('空昵称自动生成「玩家+4位随机」',
     !!(autoNick.json && autoNick.json.room && /^玩家\d{4}$/.test(autoNick.json.room.players[0].nickname)),
     autoNick.json && autoNick.json.room && autoNick.json.room.players[0].nickname);
+  /* v3：不限时房（turnSeconds=0）合法 */
+  const unlimited = await api('POST', '/api/rooms', { mode: 'ranked', seriesCount: 1, playerKey: P1, adminUser: a0.adminUser, adminPass: a0.adminPass, turnSeconds: 0 });
+  checkEq('turnSeconds=0（不限时）→ 200', unlimited.status, 200);
+  checkEq('不限时房 room.turnSeconds=0', unlimited.json && unlimited.json.room.turnSeconds, 0);
 
   /* ---------- 3. 建房（ranked，BO2） ---------- */
   group('3. 建房 + 蓝图镜像（ranked / kpl / peak）');
-  const created = await api('POST', '/api/rooms', {
-    name: '自检房', mode: 'ranked', seriesCount: 2, nickname: '房主', playerKey: P1
-  });
+  const createdRoom = await newRoom({ name: '自检房', mode: 'ranked', seriesCount: 2, nickname: '房主', playerKey: P1 });
+  const created = createdRoom.res;
   checkEq('建房 HTTP 200', created.status, 200);
+  checkEq('建房后自动开局（管理员 launch）HTTP 200', createdRoom.launch && createdRoom.launch.status, 200);
   const room = created.json && created.json.room;
   check('返回 room.code（6 位、字符集不含 I/O/0/1）',
     !!room && /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$/.test(room.code), room && room.code);
   checkEq('mode=ranked', room && room.mode, 'ranked');
   checkEq('seriesCount=2', room && room.seriesCount, 2);
   checkEq('房主自动坐蓝方 0 号位', created.json && created.json.me && created.json.me.team + ':' + created.json.me.slot, 'blue:0');
+  checkEq('建房响应里 launched=false（还没点开始 BP）', room && room.launched, false);
   const CODE = room.code;
 
   const st0 = await api('GET', '/api/rooms/' + CODE + '/state?playerKey=' + P1);
   checkEq('state HTTP 200', st0.status, 200);
+  checkEq('开局后 room.launched=true', st0.json.room.launched, true);
   const order0 = st0.json && st0.json.series && st0.json.series.order;
   checkEq('ranked order 长度 16', order0 && order0.length, 16);
   check('ranked order 逐项 = js/draft.js 的 MODES',
@@ -290,10 +363,10 @@ async function runSuite() {
     st0.json && JSON.stringify(st0.json.game.nextAction && { side: st0.json.game.nextAction.side, action: st0.json.game.nextAction.action }),
     JSON.stringify({ side: 'blue', action: 'ban' }));
 
-  /* kpl / peak 蓝图镜像独立验证（各建一个房，只看 order） */
+  /* kpl / peak 蓝图镜像独立验证（各建一个房，只看 order；不需要开局） */
   for (const mode of ['kpl', 'peak']) {
-    const r = await api('POST', '/api/rooms', { name: '自检-' + mode, mode, seriesCount: 1, nickname: '房主', playerKey: P1 });
-    const code = r.json && r.json.room && r.json.room.code;
+    const r = await newRoom({ name: '自检-' + mode, mode, seriesCount: 1, nickname: '房主', playerKey: P1 }, { autoLaunch: false });
+    const code = r.code;
     const st = await api('GET', '/api/rooms/' + code + '/state');
     const ord = st.json && st.json.series && st.json.series.order;
     checkEq(mode + ' order 长度 ' + EXPECTED[mode].length, ord && ord.length, EXPECTED[mode].length);
@@ -627,7 +700,8 @@ async function runSuite() {
 
   /* ---------- 15. BO1：next-game 直接结束整场 ---------- */
   group('15. BO1 换局即整场结束');
-  const bo1 = await api('POST', '/api/rooms', { name: 'BO1', mode: 'ranked', seriesCount: 1, nickname: 'BO1房主', playerKey: P1 });
+  const bo1Room = await newRoom({ name: 'BO1', mode: 'ranked', seriesCount: 1, nickname: 'BO1房主', playerKey: P1 });
+  const bo1 = bo1Room.res;
   const bo1Code = bo1.json.room.code;
   const bo1Undo = await api('POST', '/api/rooms/' + bo1Code + '/undo', {}, P1);
   checkEq('没落子就撤销 → 409', bo1Undo.status, 409);
@@ -641,7 +715,8 @@ async function runSuite() {
 
   /* ---------- 16. 随机征召 ---------- */
   group('16. 随机征召洗牌（契约 §6）');
-  const rnd = await api('POST', '/api/rooms', { name: '随机', mode: 'random', seriesCount: 1, nickname: '随机房主', playerKey: P1 });
+  const rndRoom = await newRoom({ name: '随机', mode: 'random', seriesCount: 1, nickname: '随机房主', playerKey: P1 });
+  const rnd = rndRoom.res;
   const rndCode = rnd.json.room.code;
   await api('POST', '/api/rooms/' + rndCode + '/join', { nickname: '红方', playerKey: P2, team: 'red' });
   const rndState = await api('GET', '/api/rooms/' + rndCode + '/state');
@@ -699,7 +774,8 @@ async function runSuite() {
 
   /* ---------- 17. 巅峰赛 'both' 步语义 ---------- */
   group('17. 巅峰赛 both 步（一步吃 6 手）');
-  const peak = await api('POST', '/api/rooms', { name: '巅峰', mode: 'peak', seriesCount: 1, nickname: '巅峰房主', playerKey: P1 });
+  const peakRoom = await newRoom({ name: '巅峰', mode: 'peak', seriesCount: 1, nickname: '巅峰房主', playerKey: P1 });
+  const peak = peakRoom.res;
   const peakCode = peak.json.room.code;
   await api('POST', '/api/rooms/' + peakCode + '/join', { nickname: '红方', playerKey: P2, team: 'red' });
 
@@ -757,7 +833,8 @@ async function runSuite() {
 
   /* ---------- 18. 全局 BP 池（kpl 单边限制） ---------- */
   group('18. 全局 BP 池（kpl 单边限制）');
-  const gp = await api('POST', '/api/rooms', { name: '全局BP', mode: 'kpl', seriesCount: 2, nickname: '全局房主', playerKey: P1 });
+  const gpRoom = await newRoom({ name: '全局BP', mode: 'kpl', seriesCount: 2, nickname: '全局房主', playerKey: P1 });
+  const gp = gpRoom.res;
   const gpCode = gp.json.room.code;
   await api('POST', '/api/rooms/' + gpCode + '/join', { nickname: '红方', playerKey: P2, team: 'red' });
 
@@ -910,6 +987,392 @@ async function runSuite() {
   const peakAfterLeave = await api('GET', '/api/rooms/' + peakCode + '/state');
   checkEq('离房后成员 -1', peakAfterLeave.json.players.length, 1);
 
+  /* ---------- 21. v3：管理员账号 / 开局闸门 / 服务端权威自动计时 ---------- */
+  group('21. v3 管理员账号 + 开局闸门 + 自动计时（契约 §3.0 / §3.0.1 / §6.4）');
+  const V1 = 'verify-v3a-' + Date.now();
+  const V2 = 'verify-v3b-' + Date.now();
+  const v3Admin = adminCreds();
+
+  /* 超时房（turnSeconds=30，最小值）：本组开始时创建，本组结束时再来验证「到 0 不代替落子」 */
+  const t30Admin = adminCreds();
+  const t30 = await api('POST', '/api/rooms', {
+    name: '超时房', mode: 'ranked', seriesCount: 1, turnSeconds: 30,
+    nickname: '超时房主', playerKey: V1,
+    adminUser: t30Admin.adminUser, adminPass: t30Admin.adminPass
+  });
+  const T30CODE = t30.json.room.code;
+  const t30LaunchAt = Date.now();
+  const t30Launch = await api('POST', '/api/rooms/' + T30CODE + '/launch', { adminToken: t30.json.adminToken });
+  checkEq('turnSeconds=30 的房可以开局', t30Launch.status, 200);
+  checkEq('开局后 turn.seconds=30（建房配置生效）', t30Launch.json.game.turn.seconds, 30);
+
+  const v3 = await api('POST', '/api/rooms', {
+    name: 'v3流程房', mode: 'ranked', seriesCount: 2, turnSeconds: 60,
+    nickname: 'v3房主', playerKey: V1,
+    adminUser: v3Admin.adminUser, adminPass: v3Admin.adminPass
+  });
+  checkEq('建房（带管理员账号）HTTP 200', v3.status, 200);
+  const V3CODE = v3.json.room.code;
+  const V3TOKEN0 = v3.json.adminToken;
+  check('建房返回 adminToken（32 字节 hex）', /^[0-9a-f]{64}$/.test(String(V3TOKEN0)), String(V3TOKEN0).slice(0, 12) + '…');
+  checkEq('默认未开局（launched=false）', v3.json.room.launched, false);
+  checkEq('room.turnSeconds=60', v3.json.room.turnSeconds, 60);
+  checkEq('room.paused=false', v3.json.room.paused, false);
+  check('建房返回 adminTokenExpiresAt（12 小时）', (() => {
+    const t = new Date(v3.json.adminTokenExpiresAt).getTime();
+    return Number.isFinite(t) && Math.abs(t - (Date.now() + 12 * 3600 * 1000)) < 60000;
+  })(), v3.json.adminTokenExpiresAt);
+
+  /* 未开局：任何落子都被拒（用户明确要求的第一步闸门） */
+  const preA = await api('POST', '/api/rooms/' + V3CODE + '/action', { side: 'blue', action: 'ban', heroId: H1 }, V1);
+  checkEq('未开局落子 → 409', preA.status, 409);
+  checkEq('未开局落子 → ERR_NOT_LAUNCHED', preA.json && preA.json.code, 'ERR_NOT_LAUNCHED');
+  check('未开局提示是中文且点明「开始 BP」', !!(preA.json && /管理员|开始 BP/.test(preA.json.error)), preA.json && preA.json.error);
+  const preB = await api('POST', '/api/rooms/' + V3CODE + '/action', { side: 'blue', action: 'ban', heroId: H2 }, V2);
+  checkEq('没入房的人落子 → 403 ERR_NOT_IN_ROOM（优先于开局判定）', preB.json && preB.json.code, 'ERR_NOT_IN_ROOM');
+  await api('POST', '/api/rooms/' + V3CODE + '/join', { nickname: '第二人', playerKey: V2, team: 'red' });
+  const preB2 = await api('POST', '/api/rooms/' + V3CODE + '/action', { side: 'blue', action: 'ban', heroId: H2 }, V2);
+  checkEq('入房后未开局落子 → ERR_NOT_LAUNCHED（对所有人都一样）', preB2.json && preB2.json.code, 'ERR_NOT_LAUNCHED');
+  const preO = await api('POST', '/api/rooms/' + V3CODE + '/action', { side: 'blue', action: 'ban', heroId: H1 }, OUT);
+  checkEq('房间外的人仍然优先 403 ERR_NOT_IN_ROOM（不泄露开局状态）', preO.json && preO.json.code, 'ERR_NOT_IN_ROOM');
+
+  const preState = await api('GET', '/api/rooms/' + V3CODE + '/state?playerKey=' + V1);
+  checkEq('未开局 state.room.launched=false', preState.json.room.launched, false);
+  checkEq('未开局 turn.deadline=null', preState.json.game.turn.deadline, null);
+  checkEq('未开局 turn.remainingMs=null', preState.json.game.turn.remainingMs, null);
+  checkEq('未开局 turn.seconds 照常下发（前端显示配置）', preState.json.game.turn.seconds, 60);
+  checkEq('state.admin.users = 管理员账号名', JSON.stringify(preState.json.admin.users), JSON.stringify([v3Admin.adminUser]));
+  checkEq('不带 adminToken 时 admin.you=false', preState.json.admin.you, false);
+
+  /* 非管理员 launch：403 / 401 */
+  const l0 = await api('POST', '/api/rooms/' + V3CODE + '/launch', {});
+  checkEq('不带 adminToken 开局 → 403', l0.status, 403);
+  checkEq('不带 adminToken → ERR_NOT_ADMIN', l0.json && l0.json.code, 'ERR_NOT_ADMIN');
+  const l1 = await api('POST', '/api/rooms/' + V3CODE + '/launch', {}, V1);
+  checkEq('只有 playerKey（普通队员）不能开局 → 403 ERR_NOT_ADMIN', l1.json && l1.json.code, 'ERR_NOT_ADMIN');
+  const l2 = await api('POST', '/api/rooms/' + V3CODE + '/launch', { adminToken: 'f'.repeat(64) });
+  checkEq('伪造 adminToken → 401', l2.status, 401);
+  checkEq('伪造 adminToken → ERR_BAD_TOKEN', l2.json && l2.json.code, 'ERR_BAD_TOKEN');
+  const otherRoom = await newRoom({ name: '别的房', mode: 'ranked', seriesCount: 1, nickname: '别人', playerKey: V2 }, { autoLaunch: false });
+  const l3 = await api('POST', '/api/rooms/' + V3CODE + '/launch', { adminToken: otherRoom.token });
+  checkEq('拿别的房间的 adminToken → 401', l3.status, 401);
+  checkEq('跨房间 token → ERR_BAD_TOKEN', l3.json && l3.json.code, 'ERR_BAD_TOKEN');
+
+  /* 管理员登录（账号 + 密码） */
+  const lg0 = await api('POST', '/api/rooms/' + V3CODE + '/admin-login', { adminUser: v3Admin.adminUser, adminPass: 'wrong-pass-1' });
+  checkEq('密码错误 → 401', lg0.status, 401);
+  checkEq('密码错误 → ERR_BAD_CREDENTIALS', lg0.json && lg0.json.code, 'ERR_BAD_CREDENTIALS');
+  const lgUnknown = await api('POST', '/api/rooms/' + V3CODE + '/admin-login', { adminUser: 'nobody_here', adminPass: v3Admin.adminPass });
+  checkEq('账号不存在 → 401（与密码错同码）', lgUnknown.status, 401);
+  checkEq('账号不存在 → ERR_BAD_CREDENTIALS（同码，防账号探测）', lgUnknown.json && lgUnknown.json.code, 'ERR_BAD_CREDENTIALS');
+  checkEq('账号不存在与密码错：HTTP 码一致', lgUnknown.status, lg0.status);
+  checkEq('账号不存在与密码错：code 一致', lgUnknown.json && lgUnknown.json.code, lg0.json && lg0.json.code);
+  checkEq('账号不存在与密码错：error 文案逐字一致', lgUnknown.json && lgUnknown.json.error, lg0.json && lg0.json.error);
+  check('登录失败文案是中文', !!(lg0.json && /管理员账号或密码/.test(lg0.json.error)), lg0.json && lg0.json.error);
+  /* 格式不合法仍然 400（ERR_BAD_ADMIN_USER / ERR_BAD_ADMIN_PASS） */
+  const lgFmtUser = await api('POST', '/api/rooms/' + V3CODE + '/admin-login', { adminUser: 'ab', adminPass: v3Admin.adminPass });
+  checkEq('登录账号格式不合法 → 400', lgFmtUser.status, 400);
+  checkEq('登录账号格式不合法 → ERR_BAD_ADMIN_USER', lgFmtUser.json && lgFmtUser.json.code, 'ERR_BAD_ADMIN_USER');
+  const lgFmtPass = await api('POST', '/api/rooms/' + V3CODE + '/admin-login', { adminUser: v3Admin.adminUser, adminPass: '12345' });
+  checkEq('登录密码格式不合法 → 400', lgFmtPass.status, 400);
+  checkEq('登录密码格式不合法 → ERR_BAD_ADMIN_PASS', lgFmtPass.json && lgFmtPass.json.code, 'ERR_BAD_ADMIN_PASS');
+  const lg = await api('POST', '/api/rooms/' + V3CODE + '/admin-login', { adminUser: v3Admin.adminUser, adminPass: v3Admin.adminPass });
+  checkEq('管理员登录 HTTP 200', lg.status, 200);
+  const V3TOKEN = lg.json.adminToken;
+  check('登录返回 adminToken（64 位 hex）', /^[0-9a-f]{64}$/.test(String(V3TOKEN)));
+  check('每次登录独立令牌（与建房时不同）', V3TOKEN !== V3TOKEN0);
+  const stToken = await api('GET', '/api/rooms/' + V3CODE + '/state?playerKey=' + V1 + '&adminToken=' + V3TOKEN);
+  checkEq('带 adminToken 读 state → admin.you=true', stToken.json.admin.you, true);
+  const stHeader = await request('GET', '/api/rooms/' + V3CODE + '/state?playerKey=' + V1, { headers: { 'X-Admin-Token': V3TOKEN } });
+  checkEq('adminToken 也能走 X-Admin-Token 请求头', stHeader.json.admin.you, true);
+  const adminSse = openSse(V3CODE, V1, V3TOKEN);
+  const adminSseState = await adminSse.waitFor('state', 5000);
+  checkEq('SSE 的 state 也按连接算 admin.you（管理员连接=true）', adminSseState && adminSseState.data.admin.you, true);
+  adminSse.close();
+
+  /* 管理员开局 */
+  const lc = await api('POST', '/api/rooms/' + V3CODE + '/launch', { adminToken: V3TOKEN });
+  checkEq('管理员开局 HTTP 200', lc.status, 200);
+  checkEq('开局后 room.launched=true', lc.json.room.launched, true);
+  checkEq('开局后 room.status=drafting', lc.json.room.status, 'drafting');
+  checkEq('开局返回 launchedBy=管理员账号', lc.json.launchedBy, v3Admin.adminUser);
+  check('开局即开始第一手计时（deadline 在 0..60 秒内）', (() => {
+    const dl = new Date(lc.json.game.turn.deadline).getTime();
+    return Number.isFinite(dl) && dl > Date.now() - 2000 && dl <= Date.now() + 61000;
+  })(), lc.json.game.turn.deadline);
+  check('开局 remainingMs ∈ (0, 60000]',
+    typeof lc.json.game.turn.remainingMs === 'number' && lc.json.game.turn.remainingMs > 0 && lc.json.game.turn.remainingMs <= 60000,
+    String(lc.json.game.turn.remainingMs));
+  const lc2 = await api('POST', '/api/rooms/' + V3CODE + '/launch', { adminToken: V3TOKEN });
+  checkEq('还没落子时重复开局 → 200（只是重新计时）', lc2.status, 200);
+
+  /* 落一手 → 计时立即重置 */
+  const act1 = await api('POST', '/api/rooms/' + V3CODE + '/action', { side: 'blue', action: 'ban', heroId: H1 }, V1);
+  checkEq('开局后落子 HTTP 200', act1.status, 200);
+  const turn1 = act1.json.game.turn;
+  checkEq('落子后 turn.seconds=60', turn1.seconds, 60);
+  check('落子后 remainingMs 重置回接近 60000', turn1.remainingMs > 53000 && turn1.remainingMs <= 60000, String(turn1.remainingMs));
+  check('落子后 deadline ≈ 现在 + 60 秒', Math.abs(new Date(turn1.deadline).getTime() - Date.now() - 60000) < 5000, turn1.deadline);
+
+  /* 计时确实在走（服务端算，客户端不用自己起算） */
+  const s1 = await api('GET', '/api/rooms/' + V3CODE + '/state');
+  await sleep(1200);
+  const s2 = await api('GET', '/api/rooms/' + V3CODE + '/state');
+  const drop = s1.json.game.turn.remainingMs - s2.json.game.turn.remainingMs;
+  check('1.2 秒后 remainingMs 减少约 1.2 秒（计时在走）', drop > 800 && drop < 3000, '减少了 ' + drop + 'ms');
+  checkEq('同一手的 deadline 稳定（两次读一致）', s1.json.game.turn.deadline, s2.json.game.turn.deadline);
+
+  /* 撤销也要重置计时 */
+  const undoV3 = await api('POST', '/api/rooms/' + V3CODE + '/undo', {}, V1);
+  checkEq('撤销 HTTP 200', undoV3.status, 200);
+  check('撤销后 remainingMs 重置回接近 60000', undoV3.json.game.turn.remainingMs > 53000, String(undoV3.json.game.turn.remainingMs));
+
+  /* 暂停 / 继续（管理员） */
+  const pauseNoAuth = await api('POST', '/api/rooms/' + V3CODE + '/pause', { paused: true }, V1);
+  checkEq('普通队员不能暂停 → 403 ERR_NOT_ADMIN', pauseNoAuth.json && pauseNoAuth.json.code, 'ERR_NOT_ADMIN');
+  const pause = await api('POST', '/api/rooms/' + V3CODE + '/pause', { adminToken: V3TOKEN, paused: true });
+  checkEq('管理员暂停 HTTP 200', pause.status, 200);
+  checkEq('暂停后 room.paused=true', pause.json.room.paused, true);
+  checkEq('暂停后 turn.deadline=null（契约 §6.4 规则 3）', pause.json.game.turn.deadline, null);
+  const frozen = pause.json.game.turn.remainingMs;
+  check('暂停后 remainingMs 保留剩余时间（>0 且 ≤60000）', frozen > 0 && frozen <= 60000, String(frozen));
+  await sleep(900);
+  const during = await api('GET', '/api/rooms/' + V3CODE + '/state');
+  checkEq('暂停期间 remainingMs 冻结不变', during.json.game.turn.remainingMs, frozen);
+  checkEq('暂停期间 room.paused=true 随 state 下发', during.json.room.paused, true);
+  const resume = await api('POST', '/api/rooms/' + V3CODE + '/pause', { adminToken: V3TOKEN, paused: false });
+  checkEq('继续 HTTP 200', resume.status, 200);
+  checkEq('继续后 room.paused=false', resume.json.room.paused, false);
+  check('继续后按剩余时间续上（不是重新 60 秒）',
+    resume.json.game.turn.remainingMs <= frozen && resume.json.game.turn.remainingMs > 0,
+    '续上 ' + resume.json.game.turn.remainingMs + 'ms（暂停时冻结 ' + frozen + 'ms）');
+  check('继续后重新给出 deadline', !!resume.json.game.turn.deadline);
+  const tog1 = await api('POST', '/api/rooms/' + V3CODE + '/pause', { adminToken: V3TOKEN });
+  checkEq('pause 不传 paused = 切换成暂停', tog1.json.paused, true);
+  const tog2 = await api('POST', '/api/rooms/' + V3CODE + '/pause', { adminToken: V3TOKEN });
+  checkEq('再调一次 = 切回继续', tog2.json.paused, false);
+
+  /* 换局 → 新一局计时从头开始 */
+  const nextV3 = await api('POST', '/api/rooms/' + V3CODE + '/next-game', { winner: 'blue' }, V1);
+  checkEq('换局 HTTP 200', nextV3.status, 200);
+  checkEq('新一局 gameNo=2', nextV3.json.game.gameNo, 2);
+  check('新一局 remainingMs 重置回接近 60000', nextV3.json.game.turn.remainingMs > 53000, String(nextV3.json.game.turn.remainingMs));
+
+  /* 结束整场后不再计时 */
+  const finV3 = await api('POST', '/api/rooms/' + V3CODE + '/finish', {}, V1);
+  checkEq('结束系列 HTTP 200', finV3.status, 200);
+  const finState = await api('GET', '/api/rooms/' + V3CODE + '/state');
+  checkEq('结束后 turn.remainingMs=null', finState.json.game.turn.remainingMs, null);
+  checkEq('结束后 turn.deadline=null', finState.json.game.turn.deadline, null);
+
+  /* 到 0 不代替玩家落子：30 秒的房现在应该已经到点了 */
+  const elapsed = Date.now() - t30LaunchAt;
+  const need = 30500 - elapsed;
+  console.log('    （验证「超时」语义：超时房已跑 ' + (elapsed / 1000).toFixed(1) + ' 秒，再等 ' +
+    (need > 0 ? (need / 1000).toFixed(1) : '0') + ' 秒…）');
+  if (need > 0) await sleep(need);
+  const toState = await api('GET', '/api/rooms/' + T30CODE + '/state');
+  checkEq('超时后 remainingMs 停在 0（不为负）', toState.json.game.turn.remainingMs, 0);
+  checkEq('超时不会替玩家落子（actions 仍为 0）', toState.json.actions.length, 0);
+  checkEq('超时后轮次没有被推进（仍是蓝方 ban）',
+    toState.json.game.nextAction && toState.json.game.nextAction.side + ':' + toState.json.game.nextAction.action, 'blue:ban');
+  check('超时后 deadline 仍在（只是已经过去）', !!toState.json.game.turn.deadline);
+  const toAct = await api('POST', '/api/rooms/' + T30CODE + '/action', { side: 'blue', action: 'ban', heroId: H3 }, V1);
+  check('超时后玩家仍可自己落子（服务端不锁死、也不代打）', toAct.json && toAct.json.ok === true, toAct.json && (toAct.json.code || ''));
+  check('落子后计时又重置回接近 30000', toAct.json && toAct.json.game.turn.remainingMs > 26000, toAct.json && String(toAct.json.game.turn.remainingMs));
+
+  /* ---------- 22. 密码哈希本体（scrypt） ---------- */
+  group('22. 管理员密码哈希（scrypt 加盐，契约 §3.0.1）');
+  const apiMod = require(path.join(ROOT, 'server', 'api.js'));
+  const PLAIN = '明文密码-123456';
+  const hash1 = apiMod.hashPassword(PLAIN);
+  check('哈希串形如 scrypt$N$r$p$salt$hash',
+    /^scrypt\$\d+\$\d+\$\d+\$[0-9a-f]{32}\$[0-9a-f]{64}$/.test(hash1), hash1);
+  check('哈希串里不含明文密码', hash1.indexOf(PLAIN) === -1);
+  check('同一个密码两次哈希结果不同（随机盐）', apiMod.hashPassword(PLAIN) !== hash1);
+  check('正确密码校验通过', apiMod.verifyPassword(PLAIN, hash1) === true);
+  check('错误密码校验失败', apiMod.verifyPassword(PLAIN + 'x', hash1) === false);
+  check('损坏/伪造的哈希串返回 false 而不抛异常',
+    apiMod.verifyPassword('x', 'plain-text') === false &&
+    apiMod.verifyPassword('x', 'scrypt$1$2$3$zz$00') === false &&
+    apiMod.verifyPassword('x', '') === false);
+  check('sha256(token) 是 64 位 hex', /^[0-9a-f]{64}$/.test(apiMod.sha256hex('abc')));
+
+  /* ---------- 23. 老库幂等迁移（真库直连 + 隔离临时库） ---------- */
+  group('23. 老库幂等迁移（契约 §2.1）');
+  if (OPT.base) {
+    console.log('    （--base 模式不知道数据库连接参数，跳过；迁移证据请用默认模式跑）');
+  } else if (OPT.memory) {
+    const vdb = require(path.join(ROOT, 'server', 'db.js'));
+    await vdb.init();
+    const m1 = vdb.migration();
+    await vdb.init();
+    const m2 = vdb.migration();
+    check('内存驱动连续两次 init 都不抛错', true);
+    checkEq('内存驱动 migration().driver=memory', m2.driver, 'memory');
+    checkEq('内存驱动不需要迁移（added 为空）', m1.added.length + m2.added.length, 0);
+    await vdb.close();
+    console.log('    （内存驱动没有真实表结构：information_schema / 老库升级 / 库内哈希证据跳过，真库模式会跑）');
+  } else {
+    const vdb = require(path.join(ROOT, 'server', 'db.js'));
+    const DBNAME = process.env.WZBP_DB_NAME || 'wzbp';
+
+    /* 23.1 在**当前真库**上重复 init：不应再 ALTER，也不应报错 */
+    await vdb.init();
+    const m1 = vdb.migration();
+    checkEq('对已迁移的库再 init 一次不新增列（added 为空）', m1.added.length, 0);
+    checkEq('migration().driver=mysql', m1.driver, 'mysql');
+
+    /* 23.2 结构断言（真库 information_schema） */
+    const cols = await vdb.query(
+      'SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = ?',
+      [DBNAME, 'rooms']);
+    const colNames = cols.map((c) => String(c.column_name || c.COLUMN_NAME).toLowerCase());
+    for (const c of ['launched', 'turn_seconds', 'paused']) {
+      check('真库 rooms 有列 ' + c, colNames.indexOf(c) >= 0, colNames.join(','));
+    }
+    const tabs = await vdb.query(
+      'SELECT table_name FROM information_schema.tables WHERE table_schema = ?', [DBNAME]);
+    const tabNames = tabs.map((t) => String(t.table_name || t.TABLE_NAME).toLowerCase());
+    check('真库有 room_admins 表', tabNames.indexOf('room_admins') >= 0, tabNames.join(','));
+    check('真库有 admin_tokens 表', tabNames.indexOf('admin_tokens') >= 0, tabNames.join(','));
+    if (logPath) {
+      const migLine = (readLog().match(/\[db\] v3 迁移：[^\n]*/) || [null])[0];
+      console.log('    ↳ 服务启动日志：' + (migLine || '（本次启动没有打迁移行：库已是 v3 结构 → 幂等重跑，符合预期）'));
+    }
+
+    /* 23.3 库里的密码哈希：不是明文，且服务端能校验通过 */
+    const admRows = await vdb.query(
+      'SELECT username, pass_hash FROM room_admins WHERE room_id = (SELECT id FROM rooms WHERE code = ?)',
+      [V3CODE]);
+    checkEq('真库 room_admins 里有这条管理员', admRows.length, 1);
+    const storedHash = admRows.length ? String(admRows[0].pass_hash) : '';
+    check('库里 pass_hash 是 scrypt 串（形如 scrypt$N$r$p$salt$hash）',
+      /^scrypt\$\d+\$\d+\$\d+\$[0-9a-f]{32}\$[0-9a-f]{64}$/.test(storedHash), storedHash.slice(0, 30) + '…');
+    check('库里绝不存明文密码', storedHash.indexOf(v3Admin.adminPass) === -1 && storedHash !== v3Admin.adminPass);
+    check('库里的哈希能被服务端校验通过（相同参数 + timingSafeEqual）',
+      apiMod.verifyPassword(v3Admin.adminPass, storedHash) === true);
+    check('库里的哈希对错误密码判失败', apiMod.verifyPassword(v3Admin.adminPass + 'x', storedHash) === false);
+    const tokRows = await vdb.query('SELECT token_hash FROM admin_tokens WHERE room_id = (SELECT id FROM rooms WHERE code = ?)', [V3CODE]);
+    check('库里只存 token 的 sha256（没有明文 token）',
+      tokRows.length >= 1 && tokRows.every((r) => /^[0-9a-f]{64}$/.test(String(r.token_hash))) &&
+      tokRows.every((r) => String(r.token_hash) !== V3TOKEN), '共 ' + tokRows.length + ' 条');
+
+    /* 23.4 token 过期 → 401（直接把库里的 expires_at 改到过去） */
+    await vdb.query('UPDATE admin_tokens SET expires_at = ? WHERE token_hash = ?',
+      [new Date(Date.now() - 5000), apiMod.sha256hex(V3TOKEN)]);
+    const expired = await api('POST', '/api/rooms/' + V3CODE + '/pause', { adminToken: V3TOKEN });
+    checkEq('已过期的 token → 401', expired.status, 401);
+    checkEq('已过期的 token → ERR_BAD_TOKEN', expired.json && expired.json.code, 'ERR_BAD_TOKEN');
+    const stExpired = await api('GET', '/api/rooms/' + V3CODE + '/state?adminToken=' + V3TOKEN);
+    checkEq('过期后 state.admin.you=false', stExpired.json.admin.you, false);
+
+    /* 23.5 admin-logout 立刻作废令牌 */
+    const logout = await api('POST', '/api/rooms/' + V3CODE + '/admin-logout', { adminToken: V3TOKEN0 });
+    checkEq('管理员退出 HTTP 200', logout.status, 200);
+    const afterLogout = await api('POST', '/api/rooms/' + V3CODE + '/launch', { adminToken: V3TOKEN0 });
+    checkEq('退出后的 token 立刻失效 → 401', afterLogout.status, 401);
+    checkEq('退出后 ERR_BAD_TOKEN', afterLogout.json && afterLogout.json.code, 'ERR_BAD_TOKEN');
+
+    /* 23.6 隔离临时库上完整跑一遍「v2 老库 → v3」升级 + 再跑一次（幂等） */
+    const tmpDb = 'wzbp_mig_' + Date.now().toString(36);
+    const legacyCode = ('LEG' + Date.now().toString(36).slice(-3)).toUpperCase();
+    const quietCode = ('OLD' + Date.now().toString(36).slice(-3)).toUpperCase();
+    const tmpScript = path.join(os.tmpdir(), 'wzbp-mig-check-' + Date.now() + '.js');
+    const tmpOut = path.join(os.tmpdir(), 'wzbp-mig-out-' + Date.now() + '.log');
+    let childOut = '';
+    try {
+      /* 造一个「v2 表结构 + 数据」的库：rooms 没有 launched/turn_seconds/paused */
+      await vdb.query('CREATE DATABASE IF NOT EXISTS `' + tmpDb + '` DEFAULT CHARACTER SET utf8mb4');
+      await vdb.query('CREATE TABLE `' + tmpDb + '`.`rooms` (' +
+        'id BIGINT PRIMARY KEY AUTO_INCREMENT, code VARCHAR(12) NOT NULL UNIQUE, name VARCHAR(80) NOT NULL DEFAULT \'\',' +
+        'mode VARCHAR(24) NOT NULL DEFAULT \'ranked\', series_count INT NOT NULL DEFAULT 1,' +
+        'status VARCHAR(16) NOT NULL DEFAULT \'waiting\', current_game INT NOT NULL DEFAULT 1, order_json JSON NULL,' +
+        'created_at DATETIME(3) NOT NULL, updated_at DATETIME(3) NOT NULL, INDEX idx_status_updated (status, updated_at)' +
+        ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+      await vdb.query('CREATE TABLE `' + tmpDb + '`.`series` (' +
+        'id BIGINT PRIMARY KEY AUTO_INCREMENT, room_id BIGINT NOT NULL, game_no INT NOT NULL, mode VARCHAR(24) NOT NULL,' +
+        'order_json JSON NULL, status VARCHAR(16) NOT NULL DEFAULT \'drafting\', winner VARCHAR(8) NULL,' +
+        'started_at DATETIME(3) NOT NULL, finished_at DATETIME(3) NULL, UNIQUE KEY uk_room_game (room_id, game_no),' +
+        'INDEX idx_room (room_id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+      await vdb.query('CREATE TABLE `' + tmpDb + '`.`actions` (' +
+        'id BIGINT PRIMARY KEY AUTO_INCREMENT, series_id BIGINT NOT NULL, seq INT NOT NULL, step_index INT NOT NULL,' +
+        'side VARCHAR(8) NOT NULL, `action` VARCHAR(8) NOT NULL, hero_id INT NOT NULL, hero_name VARCHAR(40) NOT NULL,' +
+        'player_key VARCHAR(64) NULL, nickname VARCHAR(40) NULL, acted_at DATETIME(3) NOT NULL, gap_ms INT NOT NULL DEFAULT 0,' +
+        'UNIQUE KEY uk_series_seq (series_id, seq), INDEX idx_series (series_id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+      const tnow = new Date();
+      const lr = await vdb.query('INSERT INTO `' + tmpDb + '`.`rooms` (code, name, mode, series_count, status, current_game, order_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [legacyCode, 'v2 老房（有动作）', 'ranked', 1, 'drafting', 1, null, tnow, tnow]);
+      const lr2 = await vdb.query('INSERT INTO `' + tmpDb + '`.`rooms` (code, name, mode, series_count, status, current_game, order_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [quietCode, 'v2 老房（没动作）', 'ranked', 1, 'waiting', 1, null, tnow, tnow]);
+      await vdb.query('INSERT INTO `' + tmpDb + '`.`series` (room_id, game_no, mode, order_json, status, winner, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [lr.insertId, 1, 'ranked', null, 'drafting', null, tnow]);
+      const lsRows = await vdb.query('SELECT id FROM `' + tmpDb + '`.`series` WHERE room_id = ? LIMIT 1', [lr.insertId]);
+      await vdb.query('INSERT INTO `' + tmpDb + '`.`actions` (series_id, seq, step_index, side, `action`, hero_id, hero_name, player_key, nickname, acted_at, gap_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [lsRows[0].id, 1, 0, 'blue', 'ban', 105, '廉颇', 'legacy-key', '老房主', tnow, 0]);
+
+      /* 子进程里连这个临时库，init() 连跑两次（= 老库升级 + 重启幂等） */
+      fs.writeFileSync(tmpScript, [
+        "'use strict';",
+        'const db = require(' + JSON.stringify(path.join(ROOT, 'server', 'db.js')) + ');',
+        '(async () => {',
+        '  const runs = [];',
+        '  await db.init();',
+        '  runs.push(db.migration());',
+        '  await db.init();',
+        '  runs.push(db.migration());',
+        "  const cols = await db.query('SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = ?', [process.env.WZBP_DB_NAME, 'rooms']);",
+        "  const rooms = await db.query('SELECT code, launched FROM rooms ORDER BY id ASC');",
+        "  console.log('MIGRESULT ' + JSON.stringify({ runs, cols: cols.map(function (c) { return String(c.column_name); }), rooms }));",
+        '  await db.close();',
+        "})().catch(function (e) { console.error('MIGFAIL ' + (e && e.stack ? e.stack : e)); process.exit(1); });"
+      ].join('\n'), 'utf8');
+
+      const outFd = fs.openSync(tmpOut, 'w');
+      const migEnv = Object.assign({}, process.env, { WZBP_DB_NAME: tmpDb });
+      const migChild = spawn(process.execPath, [tmpScript], {
+        cwd: ROOT, env: migEnv, stdio: ['ignore', outFd, outFd], windowsHide: true
+      });
+      const exitCode = await new Promise((resolve) => {
+        const timer = setTimeout(() => { try { migChild.kill(); } catch (e) { /* 忽略 */ } resolve('timeout'); }, 60000);
+        migChild.on('exit', (code) => { clearTimeout(timer); resolve(code); });
+        migChild.on('error', () => { clearTimeout(timer); resolve('spawn-error'); });
+      });
+      try { fs.closeSync(outFd); } catch (e) { /* 忽略 */ }
+      childOut = fs.readFileSync(tmpOut, 'utf8');
+
+      checkEq('隔离临时库：子进程连跑两次 init 都成功（退出码 0）', exitCode, 0);
+      const hit = childOut.match(/MIGRESULT (\{[\s\S]*\})/);
+      check('隔离临时库：拿到迁移结果', !!hit, childOut.trim().slice(-300));
+      if (hit) {
+        const mig = JSON.parse(hit[1]);
+        checkEq('老库第一次 init：新增 3 列（launched / turn_seconds / paused）',
+          mig.runs[0].added.join(','), 'rooms.launched,rooms.turn_seconds,rooms.paused');
+        checkEq('老库第一次 init：回填 1 个「已有动作」的房间',
+          mig.runs[0].backfilled, 1);
+        checkEq('第二次 init：不再重复 ALTER（added 为空 → 幂等）', mig.runs[1].added.length, 0);
+        checkEq('第二次 init：没有需要再回填的房间（backfilled=0）', mig.runs[1].backfilled, 0);
+        for (const c of ['launched', 'turn_seconds', 'paused']) {
+          check('升级后临时库 rooms 有列 ' + c, mig.cols.map((x) => x.toLowerCase()).indexOf(c) >= 0, mig.cols.join(','));
+        }
+        const leg = mig.rooms.find((r) => r.code === legacyCode);
+        const quiet = mig.rooms.find((r) => r.code === quietCode);
+        checkEq('已有动作的老房升级后 launched=1（历史房间还能继续打）', leg && Number(leg.launched), 1);
+        checkEq('没有动作的老房升级后 launched=0（不会误放行）', quiet && Number(quiet.launched), 0);
+      }
+      console.log('    ↳ 老库升级原始输出（子进程 stdout）：' + (childOut.trim().split('\n').filter((l) => l.startsWith('MIG')).join(' | ').slice(0, 500) || '（空）'));
+    } catch (e) {
+      check('隔离临时库迁移验证执行完成', false, e && e.message);
+    } finally {
+      try { await vdb.query('DROP DATABASE IF EXISTS `' + tmpDb + '`'); } catch (e) { /* 忽略 */ }
+      try { fs.unlinkSync(tmpScript); } catch (e) { /* 忽略 */ }
+      try { fs.unlinkSync(tmpOut); } catch (e) { /* 忽略 */ }
+    }
+
+    await vdb.close();
+    console.log('    （真库证据：以上断言直接读 ' + DBNAME + ' 的 information_schema / room_admins / admin_tokens）');
+  }
+
   sse.close();
   return { code: CODE, peakCode, rndCode };
 }
@@ -1016,6 +1479,8 @@ async function main() {
       WZBP_PORT: String(OPT.port),
       WZBP_DB_DRIVER: OPT.memory ? 'memory' : 'mysql'
     });
+    /* 本进程自己也要 require server/db.js（迁移证据组），驱动保持一致 */
+    if (OPT.memory) process.env.WZBP_DB_DRIVER = 'memory';
     child = spawn(process.execPath, [path.join(ROOT, 'server', 'index.js')], {
       cwd: ROOT, env,
       /* 用文件而不是管道收日志：避免极少数受限环境下管道 stdio 被拦 */

@@ -341,9 +341,94 @@ window.WZ = window.WZ || {};
       name: String(o.name || ''),
       mode: o.mode || 'ranked',
       seriesCount: Number(o.seriesCount || 1),
+      /* v3：每步倒计时秒数（0 = 不限时） */
+      turnSeconds: o.turnSeconds === undefined ? 60 : Number(o.turnSeconds),
+      /* v3：建房的人就是管理员，必须给账号密码；服务端会返回 adminToken */
+      adminUser: String(o.adminUser || ''),
+      adminPass: String(o.adminPass || ''),
       nickname: cleanName(o.nickname || net.myName()),
       playerKey: net.myKey()
+    }).then(function (res) {
+      if (res && res.adminToken) net.setAdminToken(res.adminToken, o.adminUser, res.room && res.room.code);
+      return res;
     });
+  };
+
+  /* ------------------------------------------------------------
+     v3：管理员令牌
+     ------------------------------------------------------------
+     只放内存：多人共用一台电脑时，写 localStorage 会把管理员身份串给下一个人。
+     刷新页面需要重新登录，但账号名由调用方自己记住方便重填。 */
+  var adminTok = '';
+  var adminName = '';
+  var adminTokRoom = '';
+
+  net.setAdminToken = function (token, username, forRoom) {
+    if (token && (!forRoom || !adminTokRoom || String(forRoom).toUpperCase() === adminTokRoom)) {
+      adminTok = String(token);
+      adminTokRoom = forRoom ? String(forRoom).toUpperCase() : '';
+      if (username) adminName = String(username);
+      /* adminToken 是拼在 SSE 的 URL 上的，所以「登录/退出管理员」后必须重连一次流，
+         否则流里的 state.admin.you 还是登录前算出来的旧值。 */
+      resubscribeForAdmin();
+    }
+    return adminTok;
+  };
+  net.adminToken = function () { return adminTok; };
+  net.adminUser = function () { return adminName; };
+  net.clearAdminToken = function () { adminTok = ''; adminTokRoom = ''; resubscribeForAdmin(); };
+
+  /* 管理员令牌变了就重连 SSE（函数声明会提升，放在后面也能被上面调用） */
+  function resubscribeForAdmin() {
+    try {
+      if (stream && stream.code && stream.es) {
+        var code_ = stream.code;
+        var hs = stream.handlers;      /* 重连要带着原来的回调，否则 room-ui 收不到 onState */
+        net.unsubscribe();
+        net.subscribe(code_, hs);
+      }
+    } catch (e) { /* 重连失败不影响主流程，下一次状态刷新会自愈 */ }
+  }
+
+  /* 取当前房间可用的管理员令牌（换房间就失效，避免拿旧 token 打新房间） */
+  function tokFor(room) {
+    var c = code(room);
+    if (adminTok && adminTokRoom && adminTokRoom !== c) return '';
+    return adminTok;
+  }
+  function withAdmin(body, room) {
+    var t = tokFor(room);
+    if (t) body.adminToken = t;
+    return body;
+  }
+
+  net.adminLogin = function (room, user, pass) {
+    return request('POST', '/api/rooms/' + code(room) + '/admin-login', {
+      adminUser: String(user || ''),
+      adminPass: String(pass || '')
+    }).then(function (res) {
+      if (res && res.adminToken) net.setAdminToken(res.adminToken, user, code(room));
+      return res;
+    });
+  };
+
+  net.adminLogout = function (room) {
+    var t = tokFor(room);
+    net.clearAdminToken();
+    if (!t) return Promise.resolve({ ok: true });
+    return request('POST', '/api/rooms/' + code(room) + '/admin-logout', { adminToken: t })
+      .catch(function () { return { ok: true }; });
+  };
+
+  /* 管理员开局：在此之前任何人都不能落子（服务端 ERR_NOT_LAUNCHED） */
+  net.launchRoom = function (room) {
+    return request('POST', '/api/rooms/' + code(room) + '/launch', withAdmin({}, room));
+  };
+
+  /* 暂停 / 继续计时 */
+  net.pauseRoom = function (room, paused) {
+    return request('POST', '/api/rooms/' + code(room) + '/pause',
+      withAdmin({ paused: !!paused }, room));
   };
 
   net.listRooms = function () {
@@ -367,8 +452,13 @@ window.WZ = window.WZ || {};
 
   net.getState = function (room) {
     /* GET 类接口也带上 playerKey：state 是按连接个性化的（me / isMe），
-       后端同时支持 X-Player-Key 头与 ?playerKey=，两条路都走通最稳 */
-    return request('GET', '/api/rooms/' + code(room) + '/state?playerKey=' + encodeURIComponent(net.myKey()));
+       后端同时支持 X-Player-Key 头与 ?playerKey=，两条路都走通最稳。
+       v3：还必须带 adminToken —— 否则 admin.you 永远是 false，
+       管理员就看不到也点不了「开始 BP」。 */
+    var url = '/api/rooms/' + code(room) + '/state?playerKey=' + encodeURIComponent(net.myKey());
+    var t = tokFor(room);
+    if (t) url += '&adminToken=' + encodeURIComponent(t);
+    return request('GET', url);
   };
 
   net.postAction = function (room, o) {
@@ -382,22 +472,25 @@ window.WZ = window.WZ || {};
   };
 
   net.undo = function (room) {
-    return request('POST', '/api/rooms/' + code(room) + '/undo', { playerKey: net.myKey() });
+    return request('POST', '/api/rooms/' + code(room) + '/undo',
+      withAdmin({ playerKey: net.myKey() }, room));
   };
 
   net.nextGame = function (room, o) {
     o = o || {};
-    var body = { playerKey: net.myKey() };
+    var body = withAdmin({ playerKey: net.myKey() }, room);
     if (o.winner) body.winner = o.winner;
     return request('POST', '/api/rooms/' + code(room) + '/next-game', body);
   };
 
   net.finishSeries = function (room) {
-    return request('POST', '/api/rooms/' + code(room) + '/finish', { playerKey: net.myKey() });
+    return request('POST', '/api/rooms/' + code(room) + '/finish',
+      withAdmin({ playerKey: net.myKey() }, room));
   };
 
   net.shuffle = function (room) {
-    return request('POST', '/api/rooms/' + code(room) + '/shuffle', { playerKey: net.myKey() });
+    return request('POST', '/api/rooms/' + code(room) + '/shuffle',
+      withAdmin({ playerKey: net.myKey() }, room));
   };
 
   net.history = function (room) {
@@ -430,9 +523,14 @@ window.WZ = window.WZ || {};
   net.streamCode = function () { return stream ? stream.code : null; };
 
   function streamUrl(c) {
-    return buildUrl('/api/stream') +
+    /* SSE 的 state 同样是按连接个性化的（me / admin.you）。
+       EventSource 不能设请求头，所以 adminToken 只能走 query。 */
+    var url = buildUrl('/api/stream') +
       '?code=' + encodeURIComponent(c) +
       '&playerKey=' + encodeURIComponent(net.myKey());
+    var t = tokFor(c);
+    if (t) url += '&adminToken=' + encodeURIComponent(t);
+    return url;
   }
 
   function stopWatchdog() {

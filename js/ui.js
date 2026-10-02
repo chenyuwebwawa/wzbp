@@ -411,6 +411,38 @@ window.WZ = window.WZ || {};
     }
   }
 
+  /* ------------------------------------------------------------
+     v3：BP 锁
+     ------------------------------------------------------------
+     联网房间里，管理员点「开始 BP」之前任何人都不能落子（服务端也会拒）。
+     这里在客户端先锁住，避免用户点了半天没反应、以为坏了。 */
+  var lock = { on: false, reason: '' };
+
+  ui.setLocked = function (on, reason) {
+    var v = !!on;
+    var r = String(reason || '');
+    if (lock.on === v && lock.reason === r) return;
+    lock.on = v;
+    lock.reason = r;
+    applyLock();
+  };
+  ui.isLocked = function () { return lock.on; };
+
+  function applyLock() {
+    var grid = document.getElementById('heroGrid');
+    if (grid) grid.classList.toggle('wz-bp-locked', lock.on);
+    var old = document.getElementById('wzBpLockNote');
+    if (old && old.parentNode) old.parentNode.removeChild(old);
+    if (!lock.on) return;
+    /* 在英雄网格上方贴一条提示，说清楚为什么不能点 */
+    var host = grid && grid.parentNode;
+    if (!host) return;
+    var note = document.createElement('div');
+    note.id = 'wzBpLockNote';
+    note.textContent = '⏳ ' + (lock.reason || '等待管理员开始 BP');
+    host.insertBefore(note, grid);
+  }
+
   /* 根据当前 BP 步骤刷新按钮可用状态 */
   function syncActions() {
     if (!dom.panel) return;
@@ -424,6 +456,8 @@ window.WZ = window.WZ || {};
 
     btns.forEach(function (b) {
       var can = !!hero && !taken && WZ.draft.canAct(b.dataset.side, b.dataset.action);
+      /* v3：管理员还没点「开始 BP」时，所有操作都锁住 */
+      if (lock.on) can = false;
       /* 全局 BP：本方之前小局选过的英雄，本方不能再选；禁用不受限制 */
       var blocked = false;
       if (can && globalOn && b.dataset.action === 'pick' && hero) {

@@ -27,17 +27,35 @@ const TEAM_SIZE = 5;
 const MAX_SLOT = TEAM_SIZE - 1;
 const ONLINE_WINDOW_MS = 45000;   // 最近 45 秒有活动也算在线（SSE 断线时兜底）
 
+/* ---------------- v3 常量（契约 §3.0.1 / §3.1 / §6.4） ---------------- */
+
+const ADMIN_USER_RE = /^[A-Za-z0-9_]{3,20}$/;   // 3..20 位字母数字下划线
+const ADMIN_PASS_MIN = 6;
+const ADMIN_PASS_MAX = 64;
+const ADMIN_TOKEN_BYTES = 32;                   // 32 字节随机 → 64 位 hex
+const ADMIN_TOKEN_TTL_MS = 12 * 60 * 60 * 1000; // 12 小时
+/* scrypt 参数写进哈希串（scrypt$N$r$p$salt$hash），将来调参也不影响老哈希校验 */
+const SCRYPT = { N: 16384, r: 8, p: 1, keylen: 32, saltBytes: 16 };
+
+const TURN_DEFAULT = 60;      // 每步默认 60 秒
+const TURN_MIN = 30;          // 30..300 合法
+const TURN_MAX = 300;
+const TURN_UNLIMITED = 0;     // 0 = 不限时
+
 /* ---------------- SQL（集中一处，便于审查与自检镜像） ---------------- */
 
 const SQL = {
   roomByCode: 'SELECT * FROM rooms WHERE code = ? LIMIT 1',
   roomById: 'SELECT * FROM rooms WHERE id = ? LIMIT 1',
-  roomInsert: 'INSERT INTO rooms (code, name, mode, series_count, status, current_game, order_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+  roomInsert: 'INSERT INTO rooms (code, name, mode, series_count, status, current_game, order_json, launched, turn_seconds, paused, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
   roomList: 'SELECT r.*, (SELECT COUNT(*) FROM players p WHERE p.room_id = r.id) AS player_count FROM rooms r ORDER BY r.updated_at DESC, r.id DESC LIMIT 50',
   roomStatus: 'UPDATE rooms SET status = ?, updated_at = ? WHERE id = ?',
   roomGame: 'UPDATE rooms SET current_game = ?, status = ?, updated_at = ? WHERE id = ?',
   roomOrder: 'UPDATE rooms SET order_json = ?, updated_at = ? WHERE id = ?',
   roomTouch: 'UPDATE rooms SET updated_at = ? WHERE id = ?',
+  /* v3：管理员开局（launched=1、解除暂停、进入 BP）+ 暂停/继续 */
+  roomLaunch: "UPDATE rooms SET launched = 1, paused = 0, status = ?, updated_at = ? WHERE id = ?",
+  roomPaused: 'UPDATE rooms SET paused = ?, updated_at = ? WHERE id = ?',
 
   playerList: 'SELECT * FROM players WHERE room_id = ? ORDER BY team ASC, slot ASC',
   playerInsert: 'INSERT INTO players (room_id, player_key, nickname, team, slot, joined_at, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?)',
@@ -58,6 +76,17 @@ const SQL = {
   actionDelete: 'DELETE FROM actions WHERE id = ?',
   /* 全局 BP 池：某个房间（= 一个系列赛）里各队选过的英雄，跨小局累计 */
   globalPicks: 'SELECT a.side, a.hero_id FROM actions a JOIN series s ON s.id = a.series_id WHERE s.room_id = ? AND a.`action` = ?',
+
+  /* v3：管理员账号（密码只存 scrypt 哈希）与登录令牌（只存 sha256） */
+  adminByUser: 'SELECT * FROM room_admins WHERE room_id = ? AND username = ? LIMIT 1',
+  adminById: 'SELECT * FROM room_admins WHERE id = ? LIMIT 1',
+  adminInsert: 'INSERT INTO room_admins (room_id, username, pass_hash, is_owner, created_at) VALUES (?, ?, ?, ?, ?)',
+  adminUsers: 'SELECT username FROM room_admins WHERE room_id = ? ORDER BY id ASC',
+  tokenInsert: 'INSERT INTO admin_tokens (room_id, admin_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?)',
+  tokenByHash: 'SELECT * FROM admin_tokens WHERE token_hash = ? LIMIT 1',
+  tokenLive: 'SELECT token_hash FROM admin_tokens WHERE room_id = ? AND expires_at > ?',
+  tokenDelete: 'DELETE FROM admin_tokens WHERE token_hash = ?',
+  tokenPruneRoom: 'DELETE FROM admin_tokens WHERE room_id = ? AND expires_at <= ?',
 
   recentGames: 'SELECT s.*, r.code AS room_code, r.name AS room_name, (SELECT COUNT(*) FROM actions a WHERE a.series_id = s.id) AS action_count FROM series s JOIN rooms r ON r.id = s.room_id ORDER BY s.started_at DESC, s.id DESC LIMIT 30'
 };
@@ -118,6 +147,221 @@ function jsonColumn(v) {
   }
   return v;
 }
+
+/* ---------------- 管理员密码与令牌（契约 §3.0.1） ---------------- */
+
+function sha256hex(text) {
+  return crypto.createHash('sha256').update(String(text), 'utf8').digest('hex');
+}
+
+/** 加盐 scrypt 哈希，形如 `scrypt$N$r$p$salt$hash`（**绝不存明文**） */
+function hashPassword(pass) {
+  const salt = crypto.randomBytes(SCRYPT.saltBytes).toString('hex');
+  const key = crypto.scryptSync(String(pass), salt, SCRYPT.keylen,
+    { N: SCRYPT.N, r: SCRYPT.r, p: SCRYPT.p });
+  return ['scrypt', SCRYPT.N, SCRYPT.r, SCRYPT.p, salt, key.toString('hex')].join('$');
+}
+
+/** 校验密码：用 timingSafeEqual 定时安全比较，哈希串损坏一律返回 false */
+function verifyPassword(pass, stored) {
+  const parts = String(stored || '').split('$');
+  if (parts.length !== 6 || parts[0] !== 'scrypt') return false;
+  const N = Number(parts[1]), r = Number(parts[2]), p = Number(parts[3]);
+  const salt = parts[4], want = parts[5];
+  /* 参数上限兜底：库里被人塞了超大 N 时不至于把服务端拖死 */
+  if (!Number.isInteger(N) || !Number.isInteger(r) || !Number.isInteger(p)) return false;
+  if (N < 1024 || N > 1048576 || r < 1 || r > 32 || p < 1 || p > 16) return false;
+  if (!/^[0-9a-f]+$/i.test(salt) || !/^[0-9a-f]+$/i.test(want) || want.length % 2 !== 0) return false;
+  let got = null;
+  try {
+    got = crypto.scryptSync(String(pass), salt, want.length / 2,
+      { N, r, p, maxmem: 256 * 1024 * 1024 });
+  } catch (e) {
+    return false;
+  }
+  const expect = Buffer.from(want, 'hex');
+  if (expect.length !== got.length) return false;
+  return crypto.timingSafeEqual(expect, got);
+}
+
+/* 账号不存在时也跑一次同参数的 scrypt，避免「用时差判断账号是否存在」 */
+const DUMMY_HASH = hashPassword('wzbp-timing-equalizer');
+
+function newToken() {
+  return crypto.randomBytes(ADMIN_TOKEN_BYTES).toString('hex');
+}
+
+function validAdminUser(raw) {
+  return ADMIN_USER_RE.test(String(raw === null || raw === undefined ? '' : raw).trim());
+}
+
+/* 契约 §3.0.1：adminToken 可放请求头 X-Admin-Token、body.adminToken 或 ?adminToken= */
+function adminTokenOf(req, body, url) {
+  let t = req && req.headers ? req.headers['x-admin-token'] : '';
+  if (!t && body && body.adminToken !== undefined && body.adminToken !== null) t = body.adminToken;
+  if (!t && url && url.searchParams) t = url.searchParams.get('adminToken');
+  return t === null || t === undefined ? '' : String(t).trim();
+}
+
+/** 写库：给管理员签发一枚 12 小时有效的令牌，返回明文（明文只此一次返回给客户端） */
+async function issueAdminToken(room, adminId, now) {
+  const token = newToken();
+  const expiresAt = new Date(now.getTime() + ADMIN_TOKEN_TTL_MS);
+  await db.query(SQL.tokenPruneRoom, [room.id, now]);   // 顺手清掉该房间的过期令牌
+  await db.query(SQL.tokenInsert, [room.id, adminId, sha256hex(token), expiresAt, now]);
+  return { token, expiresAt };
+}
+
+/**
+ * 管理动作鉴权（契约 §3.0.1）：
+ *   · 没带 token          → 403 ERR_NOT_ADMIN
+ *   · token 无效/已过期   → 401 ERR_BAD_TOKEN
+ * 返回 { token, adminId, username }。
+ */
+async function requireAdmin(room, adminToken) {
+  const token = String(adminToken || '').trim();
+  if (!token) fail(403, 'ERR_NOT_ADMIN', '这个操作只有管理员能做（请先用管理员账号登录）');
+  const rows = await db.query(SQL.tokenByHash, [sha256hex(token)]);
+  const row = rows[0];
+  /* 令牌跨房间无效：拿着 A 房的 token 去开 B 房，同样算未登录 */
+  if (!row || Number(row.room_id) !== Number(room.id)) {
+    fail(401, 'ERR_BAD_TOKEN', '管理员身份已失效，请重新登录');
+  }
+  const exp = row.expires_at ? new Date(row.expires_at).getTime() : 0;
+  if (!Number.isFinite(exp) || exp <= Date.now()) {
+    await db.query(SQL.tokenDelete, [sha256hex(token)]).catch(function () { /* 清理失败不影响返回 */ });
+    fail(401, 'ERR_BAD_TOKEN', '管理员登录已过期（12 小时），请重新登录');
+  }
+  const admins = await db.query(SQL.adminById, [row.admin_id]);
+  return {
+    token: token,
+    adminId: Number(row.admin_id),
+    username: admins.length ? admins[0].username : ''
+  };
+}
+
+/* 房间管理员账号名（不含密码，可安全下发） */
+async function adminUsersOf(roomId) {
+  const rows = await db.query(SQL.adminUsers, [roomId]);
+  return rows.map(function (r) { return String(r.username); });
+}
+
+/* 未过期的令牌哈希集合：用来算 state.admin.you（每连接不同，故用哈希判断） */
+async function adminHashesOf(roomId) {
+  const rows = await db.query(SQL.tokenLive, [roomId, nowDate()]);
+  const set = new Set();
+  for (let i = 0; i < rows.length; i++) set.add(String(rows[i].token_hash));
+  return set;
+}
+
+/* ---------------- 开局闸门与自动计时（契约 §3.0 / §6.4） ---------------- */
+
+function isLaunched(room) {
+  return Number(room && room.launched) === 1 || (room && room.launched === true);
+}
+
+function isPaused(room) {
+  return Number(room && room.paused) === 1 || (room && room.paused === true);
+}
+
+/* 每步秒数：0（或非法值）= 不限时 */
+function turnSecondsOf(room) {
+  const n = Number(room && room.turn_seconds);
+  if (!Number.isFinite(n) || n <= 0) return TURN_UNLIMITED;
+  return Math.trunc(n);
+}
+
+/**
+ * 每步的截止时间是**进程内状态**，不落库：
+ * 契约 §2 的表结构里没有截止时间列，重启后当前这一步按「完整秒数」重新起算
+ * （与 launch 的语义一致），不会因为服务器重启把所有人判成超时。
+ * 结构：{ deadline:number|null, frozen:number|null, touchedAt:number }
+ *   · 正常走表：deadline = 截止毫秒；frozen = null
+ *   · 暂停/不限时：deadline = null；frozen = 暂停瞬间冻结的剩余毫秒（不限时也是 null）
+ */
+const turnTimers = new Map();
+const TIMER_PRUNE_AFTER_MS = 24 * 60 * 60 * 1000;
+const TIMER_PRUNE_OVER = 256;
+
+function putTimer(code, entry) {
+  turnTimers.set(code, entry);
+  if (turnTimers.size > TIMER_PRUNE_OVER) {
+    const now = entry.touchedAt;
+    turnTimers.forEach(function (v, k) {
+      if (now - v.touchedAt > TIMER_PRUNE_AFTER_MS) turnTimers.delete(k);
+    });
+  }
+}
+
+/** 一步开始（launch / 落子成功 / undo / shuffle / next-game）→ 重置计时 */
+function setTurn(room, nowMs) {
+  const seconds = turnSecondsOf(room);
+  if (seconds <= 0) {
+    putTimer(room.code, { deadline: null, frozen: null, touchedAt: nowMs });
+    return;
+  }
+  if (isPaused(room)) {
+    putTimer(room.code, { deadline: null, frozen: seconds * 1000, touchedAt: nowMs });
+    return;
+  }
+  putTimer(room.code, { deadline: nowMs + seconds * 1000, frozen: null, touchedAt: nowMs });
+}
+
+/** 管理员暂停/继续：暂停冻结剩余，继续按剩余续上（契约 §6.4 规则 3） */
+function pauseTurn(room, paused, nowMs) {
+  const seconds = turnSecondsOf(room);
+  const full = seconds > 0 ? seconds * 1000 : null;
+  const cur = turnTimers.get(room.code) || null;
+  if (paused) {
+    let remain = full;
+    if (cur) {
+      if (cur.deadline !== null && cur.deadline !== undefined) remain = Math.max(0, cur.deadline - nowMs);
+      else if (cur.frozen !== null && cur.frozen !== undefined) remain = Math.max(0, cur.frozen);
+    }
+    putTimer(room.code, { deadline: null, frozen: remain, touchedAt: nowMs });
+    return;
+  }
+  let remain = full;
+  if (cur && cur.frozen !== null && cur.frozen !== undefined) remain = Math.max(0, cur.frozen);
+  putTimer(room.code, {
+    deadline: seconds > 0 && remain !== null ? nowMs + remain : null,
+    frozen: null,
+    touchedAt: nowMs
+  });
+}
+
+/**
+ * 本步的计时状态（服务端权威，契约 §6.4）：
+ *   { seconds, deadline, remainingMs }
+ * · 未开局 / 系列已结束 / 本局 BP 已结束 / 不限时 → deadline=null，remainingMs=null
+ * · 暂停 → deadline=null，remainingMs=冻结的剩余毫秒
+ * · 到 0 不代替玩家落子，只把 remainingMs 停在 0
+ */
+function turnFor(room, series, actions, order) {
+  const seconds = turnSecondsOf(room);
+  const nowMs = Date.now();
+  if (!isLaunched(room) || !series || series.status !== 'drafting') {
+    return { seconds: seconds, deadline: null, remainingMs: null };
+  }
+  if (!order || !order.length || draft.stepIndexFrom(order, actions || []).done) {
+    return { seconds: seconds, deadline: null, remainingMs: null };
+  }
+  if (seconds <= 0) return { seconds: TURN_UNLIMITED, deadline: null, remainingMs: null };
+
+  let cur = turnTimers.get(room.code);
+  if (!cur) { setTurn(room, nowMs); cur = turnTimers.get(room.code); }
+  if (!cur || cur.deadline === null || cur.deadline === undefined) {
+    const frozen = cur && cur.frozen !== null && cur.frozen !== undefined ? Math.max(0, cur.frozen) : null;
+    return { seconds: seconds, deadline: null, remainingMs: frozen };
+  }
+  return {
+    seconds: seconds,
+    deadline: new Date(cur.deadline).toISOString(),
+    remainingMs: Math.max(0, cur.deadline - nowMs)
+  };
+}
+
+const TURN_IDLE = { seconds: TURN_UNLIMITED, deadline: null, remainingMs: null };
 
 /* ---------------- 请求解析 ---------------- */
 
@@ -238,6 +482,10 @@ function roomJson(room) {
     seriesCount: Number(room.series_count),
     status: room.status,
     currentGame: Number(room.current_game),
+    /* v3：管理员是否已点「开始 BP」；false 时任何落子都会被 409 ERR_NOT_LAUNCHED 拒掉 */
+    launched: isLaunched(room),
+    turnSeconds: turnSecondsOf(room),
+    paused: isPaused(room),
     createdAt: toIso(room.created_at),
     updatedAt: toIso(room.updated_at)
   };
@@ -258,7 +506,7 @@ function actionJson(a) {
   };
 }
 
-function gameJson(series, order, actions, globalUsed) {
+function gameJson(series, order, actions, globalUsed, turn) {
   const pos = draft.stepIndexFrom(order, actions);
   const bans = { blue: [], red: [] };
   const picks = { blue: [], red: [] };
@@ -288,6 +536,8 @@ function gameJson(series, order, actions, globalUsed) {
     /* 全局 BP（kpl）：本系列赛各队已选英雄，换局不清空、开新房清空 */
     global: draft.isGlobal(series.mode),
     globalUsed: globalUsed || { blue: [], red: [] },
+    /* v3 自动计时：deadline / remainingMs 由服务端此刻计算（契约 §6.4） */
+    turn: turn || TURN_IDLE,
     startedAt: toIso(series.started_at),
     finishedAt: toIso(series.finished_at),
     winner: series.winner === undefined ? null : series.winner
@@ -327,18 +577,27 @@ function stateBase(room, s, onlineKeys) {
     room: roomJson(room),
     players: pjson,
     series: seriesJson(s.series, s.order),
-    game: gameJson(s.series, s.order, s.actions, s.globalUsed),
+    game: gameJson(s.series, s.order, s.actions, s.globalUsed, s.turn),
     actions: s.actions.map(actionJson),
-    __me: meMap
+    __me: meMap,
+    /* v3：管理员名单（名字可公开，密码哈希与令牌一律不下发） */
+    __adminUsers: s.adminUsers || [],
+    /* 有效令牌的 sha256 集合：只为算「这条连接是不是管理员」 */
+    __adminHashes: s.adminHashes || new Set()
   };
 }
 
-/* 把状态基座变成某个连接看得到的 JSON（补 me / isMe，去掉内部字段） */
-function personalize(base, playerKey) {
+/* 把状态基座变成某个连接看得到的 JSON（补 me / isMe / admin.you，去掉内部字段） */
+function personalize(base, playerKey, adminToken) {
   const key = playerKey || '';
+  const hash = adminToken ? sha256hex(adminToken) : '';
   return {
     ok: true,
     room: base.room,
+    admin: {
+      you: !!(hash && base.__adminHashes && base.__adminHashes.has(hash)),
+      users: base.__adminUsers || []
+    },
     players: base.players.map(function (p) {
       return {
         nickname: p.nickname,
@@ -381,14 +640,19 @@ async function loadState(room) {
   const actions = await listActions(series.id);
   const order = orderOf(room, series);
   const globalUsed = await poolOf(room.id, series.mode);
-  return { series, players, actions, order, globalUsed };
+  /* v3：自动计时（服务端此刻算）+ 管理员名单/有效令牌（算 admin.you） */
+  const turn = turnFor(room, series, actions, order);
+  const adminUsers = await adminUsersOf(room.id);
+  const adminHashes = await adminHashesOf(room.id);
+  return { series, players, actions, order, globalUsed, turn, adminUsers, adminHashes };
 }
 
-async function buildState(room, playerKey) {
+async function buildState(room, playerKey, adminToken) {
   const s = await loadState(room);
   return personalize(
     stateBase(room, s, online.playerKeys(room.code)),
-    playerKey
+    playerKey,
+    adminToken
   );
 }
 
@@ -413,13 +677,13 @@ function sseBroadcast(code, event, payload) {
   if (online.registry) online.registry.broadcast(code, event, payload);
 }
 
-/* 全房间广播 state（按连接个性化） */
+/* 全房间广播 state（按连接个性化：me / isMe / admin.you 每人不同） */
 async function broadcastState(room) {
   if (!online.registry) return;
   const s = await loadState(room);
   const base = stateBase(room, s, online.playerKeys(room.code));
   sseBroadcast(room.code, 'state', function (client) {
-    return personalize(base, client.playerKey);
+    return personalize(base, client.playerKey, client.adminToken);
   });
 }
 
@@ -489,7 +753,7 @@ async function hHealth(req, res, url) {
   };
 }
 
-/* POST /api/rooms —— 建房（房主自动坐蓝方 0 号位） */
+/* POST /api/rooms —— 建房（v3：必须带管理员账号；建房者可选占蓝方 0 号位） */
 async function hCreateRoom(req, res, url) {
   const body = await readJson(req);
   const mode = String(body.mode === undefined || body.mode === null || body.mode === '' ? 'ranked' : body.mode)
@@ -501,8 +765,32 @@ async function hCreateRoom(req, res, url) {
     fail(400, 'ERR_BAD_SERIES', '系列赛局数必须是 1..9 的整数');
   }
 
-  const playerKey = requirePlayerKey(req, body, url);
-  const nickname = normalizeNickname(body.nickname);
+  /* v3：每步倒计时秒数（30..300，0 = 不限时，默认 60） */
+  let turnSeconds = TURN_DEFAULT;
+  if (body.turnSeconds !== undefined && body.turnSeconds !== null && body.turnSeconds !== '') {
+    turnSeconds = numOr(body.turnSeconds, NaN);
+    if (!Number.isInteger(turnSeconds) ||
+        (turnSeconds !== TURN_UNLIMITED && (turnSeconds < TURN_MIN || turnSeconds > TURN_MAX))) {
+      fail(400, 'ERR_BAD_TURN_SECONDS',
+        '每步倒计时需要 ' + TURN_MIN + '..' + TURN_MAX + ' 秒的整数（0 = 不限时）');
+    }
+  }
+
+  /* v3：管理员账号（必填）——密码只存 scrypt 哈希，明文绝不落库 */
+  const adminUser = String(body.adminUser === null || body.adminUser === undefined ? '' : body.adminUser).trim();
+  if (!validAdminUser(adminUser)) {
+    fail(400, 'ERR_BAD_ADMIN_USER', '管理员账号需要 3..20 位字母、数字或下划线');
+  }
+  const adminPass = String(body.adminPass === null || body.adminPass === undefined ? '' : body.adminPass);
+  if (adminPass.length < ADMIN_PASS_MIN || adminPass.length > ADMIN_PASS_MAX) {
+    fail(400, 'ERR_BAD_ADMIN_PASS',
+      '管理员密码需要 ' + ADMIN_PASS_MIN + '..' + ADMIN_PASS_MAX + ' 个字符');
+  }
+
+  /* v3：管理员不必占席位（可以是教练/裁判）；传了 playerKey 才自动坐蓝方 0 号位 */
+  const playerKey = playerKeyOf(req, body, url);
+  if (playerKey.length > 64) fail(400, 'ERR_BAD_PLAYER_KEY', 'playerKey 过长（最多 64 字符）');
+  const nickname = playerKey ? normalizeNickname(body.nickname) : '';
   const name = String(body.name === null || body.name === undefined ? '' : body.name).trim().slice(0, 80);
 
   const order = mode === 'random' ? draft.shuffleOrder(draft.RANDOM_BASE) : null;
@@ -514,12 +802,16 @@ async function hCreateRoom(req, res, url) {
     try {
       const r = await db.query(SQL.roomInsert, [
         code, name, mode, seriesCount, 'waiting', 1,
-        order ? JSON.stringify(order) : null, now, now
+        order ? JSON.stringify(order) : null,
+        /* launched=0：建房只是把房间搭起来，等管理员点「开始 BP」才能落子 */
+        0, turnSeconds, 0,
+        now, now
       ]);
       created = {
         id: r.insertId, code, name, mode,
         series_count: seriesCount, status: 'waiting', current_game: 1,
-        order_json: order, created_at: now, updated_at: now
+        order_json: order, launched: 0, turn_seconds: turnSeconds, paused: 0,
+        created_at: now, updated_at: now
       };
       break;
     } catch (e) {
@@ -529,16 +821,37 @@ async function hCreateRoom(req, res, url) {
   }
   if (!created) fail(500, 'ERR_CODE_GEN', '房间号生成失败，请稍后重试');
 
+  /* v3：管理员账号 + 12 小时登录令牌（库里只有哈希，明文只回给这一次请求） */
+  let adminId = 0;
+  try {
+    const ar = await db.query(SQL.adminInsert, [created.id, adminUser, hashPassword(adminPass), 1, now]);
+    adminId = ar.insertId;
+  } catch (e) {
+    if (isDup(e)) fail(409, 'ERR_ADMIN_EXISTS', '这个房间已经有管理员账号「' + adminUser + '」了');
+    throw e;
+  }
+  const issued = await issueAdminToken(created, adminId, now);
+
   await ensureSeries(created);
-  await db.query(SQL.playerInsert, [created.id, playerKey, nickname, 'blue', 0, now, now]);
+
+  let me = null;
+  if (playerKey) {
+    await db.query(SQL.playerInsert, [created.id, playerKey, nickname, 'blue', 0, now, now]);
+    me = { nickname, team: 'blue', slot: 0 };
+  }
 
   const players = await listPlayers(created.id);
   return {
     status: 200,
     body: {
       ok: true,
-      room: Object.assign(roomJson(created), { players: playersJson(players, playerKey, new Set([playerKey])) }),
-      me: { nickname, team: 'blue', slot: 0 }
+      room: Object.assign(roomJson(created), {
+        players: playersJson(players, playerKey, new Set(playerKey ? [playerKey] : []))
+      }),
+      me: me,
+      adminToken: issued.token,
+      adminTokenExpiresAt: toIso(issued.expiresAt),
+      admin: { you: true, users: [adminUser] }
     }
   };
 }
@@ -569,6 +882,10 @@ async function hListRooms(req, res, url, params) {
       playerCount: Number(r.player_count || 0),
       seriesCount: Number(r.series_count),
       currentGame: Number(r.current_game),
+      /* v3：开局状态与计时配置（列表卡片要显示「未开局 / 进行中」） */
+      launched: isLaunched(r),
+      turnSeconds: turnSecondsOf(r),
+      paused: isPaused(r),
       createdAt: toIso(r.created_at),
       updatedAt: toIso(r.updated_at)
     };
@@ -687,7 +1004,9 @@ async function hLeave(req, res, url, params) {
 async function hState(req, res, url, params) {
   const room = await mustRoom(params.code);
   const playerKey = playerKeyOf(req, null, url);
-  const body = await buildState(room, playerKey);
+  /* 带 adminToken 时 state.admin.you=true（前端据此显示管理员按钮） */
+  const adminToken = adminTokenOf(req, null, url);
+  const body = await buildState(room, playerKey, adminToken);
   return { status: 200, body };
 }
 
@@ -696,12 +1015,13 @@ async function hStream(req, res, url) {
   const room = await mustRoom(url.searchParams.get('code'));
   if (!online.registry) fail(500, 'ERR_NO_SSE', 'SSE 注册表未初始化');
   const playerKey = playerKeyOf(req, null, url);
+  const adminToken = adminTokenOf(req, null, url);
 
-  const client = online.registry.open(req, res, { code: room.code, playerKey });
+  const client = online.registry.open(req, res, { code: room.code, playerKey, adminToken });
   if (playerKey) {
     db.query(SQL.playerTouch, [nowDate(), room.id, playerKey]).catch(function () { /* 非成员也要能看直播 */ });
   }
-  const state = await buildState(room, playerKey);
+  const state = await buildState(room, playerKey, adminToken);
   online.registry.send(client, 'state', state);
   return { handled: true };
 }
@@ -722,6 +1042,8 @@ async function hShuffle(req, res, url, params) {
   const order = draft.shuffleOrder(draft.RANDOM_BASE);
   await db.query(SQL.seriesOrder, [JSON.stringify(order), series.id]);
   await db.query(SQL.roomOrder, [JSON.stringify(order), nowDate(), room.id]);
+  /* 蓝图换了 → 本步从头计时（同 §6.4「每步开始重置」） */
+  setTurn(room, Date.now());
   broadcastState(room).catch(function () {});
   return { status: 200, body: { ok: true, order } };
 }
@@ -735,6 +1057,10 @@ async function hAction(req, res, url, params) {
   /* 5) 请求方必须在这个房间里（最基础的鉴权放在最前面） */
   const me = await requireMember(room, playerKey);
   if (room.status === 'finished') fail(409, 'ERR_ROOM_FINISHED', '整场系列赛已经结束');
+  /* v3 开局闸门（契约 §3.0）：管理员没点「开始 BP」之前，任何人都不能落子 */
+  if (!isLaunched(room)) {
+    fail(409, 'ERR_NOT_LAUNCHED', '管理员还没有开启本局 BP（等管理员点「开始 BP」后再落子）');
+  }
 
   const side = String(body.side === undefined || body.side === null ? '' : body.side).trim().toLowerCase();
   const act = String(body.action === undefined || body.action === null ? '' : body.action).trim().toLowerCase();
@@ -834,9 +1160,15 @@ async function hAction(req, res, url, params) {
   /* 房间：waiting → drafting，并刷新 updated_at */
   const nextStatus = room.status === 'waiting' ? 'drafting' : room.status;
   await db.query(SQL.roomStatus, [nextStatus, nowDate(), room.id]);
+  room.status = nextStatus;
+
+  /* 契约 §6.4 规则 2：落子成功后立即重置为下一步的完整秒数 */
+  setTurn(room, Date.now());
 
   const after = await listActions(finalSeries.id);
-  const game = gameJson(finalSeries, finalOrder, after, await poolOf(room.id, finalSeries.mode));
+  const turn = turnFor(room, finalSeries, after, finalOrder);
+  const game = gameJson(finalSeries, finalOrder, after,
+    await poolOf(room.id, finalSeries.mode), turn);
   const actionPayload = actionJson(created);
 
   /* 契约 §5：先 action（音效/动画），再 state（全量） */
@@ -862,9 +1194,13 @@ async function hUndo(req, res, url, params) {
   await db.query(SQL.actionDelete, [last.id]);
   await db.query(SQL.roomTouch, [nowDate(), room.id]);
 
+  /* 契约 §6.4 规则 2：撤销同样重置本步计时 */
+  setTurn(room, Date.now());
+
   const after = await listActions(series.id);
   const order = orderOf(room, series);
-  const game = gameJson(series, order, after, await poolOf(room.id, series.mode));
+  const game = gameJson(series, order, after,
+    await poolOf(room.id, series.mode), turnFor(room, series, after, order));
   await broadcastState(room);
   return { status: 200, body: { ok: true, removed: actionJson(last), game } };
 }
@@ -899,7 +1235,10 @@ async function hNextGame(req, res, url, params) {
   if (Number(room.current_game) >= total) {
     await db.query(SQL.roomStatus, ['finished', now, room.id]);
     room.status = 'finished';
-    game = gameJson(series, orderOf(room, series), await listActions(series.id), pool);
+    const endOrder = orderOf(room, series);
+    const endActions = await listActions(series.id);
+    /* 系列已结束 → turn.deadline/remainingMs 为 null（不再计时） */
+    game = gameJson(series, endOrder, endActions, pool, turnFor(room, series, endActions, endOrder));
   } else {
     const nextNo = Number(room.current_game) + 1;
     const mode = draft.isMode(room.mode) ? room.mode : 'ranked';
@@ -914,7 +1253,10 @@ async function hNextGame(req, res, url, params) {
       id: r.insertId, room_id: room.id, game_no: nextNo, mode,
       order_json: order, status: 'drafting', winner: null, started_at: now, finished_at: null
     };
-    game = gameJson(fresh, orderOf(room, fresh), [], pool);
+    /* 换局 → 新一局从第一步开始，计时重置 */
+    setTurn(room, now.getTime());
+    const freshOrder = orderOf(room, fresh);
+    game = gameJson(fresh, freshOrder, [], pool, turnFor(room, fresh, [], freshOrder));
   }
 
   sseBroadcast(room.code, 'game', { game });
@@ -938,7 +1280,10 @@ async function hFinish(req, res, url, params) {
   room.status = 'finished';
 
   const fresh = Object.assign({}, series, { status: 'done', winner: series.winner || null, finished_at: now });
-  const game = gameJson(fresh, orderOf(room, series), await listActions(series.id), await poolOf(room.id, series.mode));
+  const finOrder = orderOf(room, series);
+  const finActions = await listActions(series.id);
+  const game = gameJson(fresh, finOrder, finActions,
+    await poolOf(room.id, series.mode), turnFor(room, fresh, finActions, finOrder));
   sseBroadcast(room.code, 'game', { game });
   await broadcastState(room);
   return { status: 200, body: { ok: true, game } };
@@ -1020,9 +1365,144 @@ async function hReplay(req, res, url, params) {
       ok: true,
       game: gameSummary(series, actions, room),
       order,
+      /* 回放是历史数据，不带实时倒计时 */
       game_state: gameJson(series, order, actions,
-        series.room_id ? await poolOf(series.room_id, series.mode) : { blue: [], red: [] }),
+        series.room_id ? await poolOf(series.room_id, series.mode) : { blue: [], red: [] }, TURN_IDLE),
       actions: actions.map(actionJson)
+    }
+  };
+}
+
+/* POST /api/rooms/:code/admin-login —— 管理员登录（契约 §3.0.1） */
+async function hAdminLogin(req, res, url, params) {
+  const room = await mustRoom(params.code);
+  const body = await readJson(req);
+
+  const adminUser = String(body.adminUser === null || body.adminUser === undefined ? '' : body.adminUser).trim();
+  if (!validAdminUser(adminUser)) {
+    fail(400, 'ERR_BAD_ADMIN_USER', '管理员账号需要 3..20 位字母、数字或下划线');
+  }
+  const adminPass = String(body.adminPass === null || body.adminPass === undefined ? '' : body.adminPass);
+  if (adminPass.length < ADMIN_PASS_MIN || adminPass.length > ADMIN_PASS_MAX) {
+    fail(400, 'ERR_BAD_ADMIN_PASS', '管理员密码需要 ' + ADMIN_PASS_MIN + '..' + ADMIN_PASS_MAX + ' 个字符');
+  }
+
+  const rows = await db.query(SQL.adminByUser, [room.id, adminUser]);
+  const row = rows[0] || null;
+  let okPass = false;
+  if (row) {
+    okPass = verifyPassword(adminPass, row.pass_hash);
+  } else {
+    /* 账号不存在也跑一次同参数 scrypt：不让人用时差判断账号是否存在 */
+    verifyPassword(adminPass, DUMMY_HASH);
+  }
+  /* 契约 §3.3：账号不存在与密码错误**同码同文案**（401 ERR_BAD_CREDENTIALS），防账号探测。
+     400 的 ERR_BAD_ADMIN_USER / ERR_BAD_ADMIN_PASS 只用于格式不合法（上面两段已处理）。 */
+  if (!row || !okPass) {
+    fail(401, 'ERR_BAD_CREDENTIALS', '管理员账号或密码不正确');
+  }
+
+  const now = nowDate();
+  const issued = await issueAdminToken(room, row.id, now);
+  const users = await adminUsersOf(room.id);
+  broadcastState(room).catch(function () { /* 让房间里的人看到管理员上线 */ });
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      adminToken: issued.token,
+      adminTokenExpiresAt: toIso(issued.expiresAt),
+      admin: { you: true, users },
+      room: roomJson(room)
+    }
+  };
+}
+
+/* POST /api/rooms/:code/admin-logout —— 退出管理员（令牌作废） */
+async function hAdminLogout(req, res, url, params) {
+  const room = await mustRoom(params.code);
+  const body = await readJson(req);
+  const admin = await requireAdmin(room, adminTokenOf(req, body, url));
+  await db.query(SQL.tokenDelete, [sha256hex(admin.token)]);
+  broadcastState(room).catch(function () { /* 忽略 */ });
+  return { status: 200, body: { ok: true, loggedOut: true } };
+}
+
+/* POST /api/rooms/:code/launch —— 管理员开局（契约 §3.0：这一步之后才能落子） */
+async function hLaunch(req, res, url, params) {
+  const room = await mustRoom(params.code);
+  const body = await readJson(req);
+  const admin = await requireAdmin(room, adminTokenOf(req, body, url));
+
+  if (room.status === 'finished') {
+    fail(409, 'ERR_ROOM_FINISHED', '整场系列赛已经结束了，不能再开局');
+  }
+
+  const series = await ensureSeries(room);
+  const actions = await listActions(series.id);
+  /* 已经开过局并且落了手 → 不允许「重新开局」（否则等于把正在打的 BP 清空重来） */
+  if (isLaunched(room) && actions.length) {
+    fail(409, 'ERR_ALREADY_STARTED', '本局已经开过局并落了手，不能重新开局（要重来请先撤销或换局）');
+  }
+
+  const now = nowDate();
+  await db.query(SQL.roomLaunch, ['drafting', now, room.id]);
+  room.launched = 1;
+  room.paused = 0;
+  room.status = 'drafting';
+
+  /* 开局 → 第一手从头计时（契约 §6.4） */
+  setTurn(room, now.getTime());
+
+  const order = orderOf(room, series);
+  const pool = await poolOf(room.id, series.mode);
+  const game = gameJson(series, order, actions, pool, turnFor(room, series, actions, order));
+
+  sseBroadcast(room.code, 'game', { game });
+  await broadcastState(room);
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      game,
+      launchedBy: admin.username,
+      room: roomJson(room)
+    }
+  };
+}
+
+/* POST /api/rooms/:code/pause —— 管理员暂停/继续计时（契约 §3 / §6.4 规则 3） */
+async function hPause(req, res, url, params) {
+  const room = await mustRoom(params.code);
+  const body = await readJson(req);
+  await requireAdmin(room, adminTokenOf(req, body, url));
+
+  if (room.status === 'finished') fail(409, 'ERR_ROOM_FINISHED', '整场系列赛已经结束了');
+
+  /* paused 不传 = 切换当前状态 */
+  let paused;
+  if (body.paused === undefined || body.paused === null || body.paused === '') {
+    paused = !isPaused(room);
+  } else {
+    paused = body.paused === true || body.paused === 1 || body.paused === '1' || body.paused === 'true';
+  }
+
+  const now = nowDate();
+  await db.query(SQL.roomPaused, [paused ? 1 : 0, now, room.id]);
+  room.paused = paused ? 1 : 0;
+
+  /* 暂停冻结剩余时间，继续时按剩余续上 */
+  pauseTurn(room, paused, now.getTime());
+
+  const s = await loadState(room);
+  broadcastState(room).catch(function () { /* 忽略 */ });
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      paused: paused,
+      room: roomJson(room),
+      game: gameJson(s.series, s.order, s.actions, s.globalUsed, s.turn)
     }
   };
 }
@@ -1033,6 +1513,11 @@ const ROUTES = [
   { method: 'GET', re: /^\/api\/health\/?$/, handler: hHealth },
   { method: 'GET', re: /^\/api\/rooms\/?$/, handler: hListRooms },
   { method: 'POST', re: /^\/api\/rooms\/?$/, handler: hCreateRoom },
+  /* v3：管理员登录/退出、开局、暂停 */
+  { method: 'POST', re: /^\/api\/rooms\/([^/]+)\/admin-login\/?$/, handler: hAdminLogin, keys: ['code'] },
+  { method: 'POST', re: /^\/api\/rooms\/([^/]+)\/admin-logout\/?$/, handler: hAdminLogout, keys: ['code'] },
+  { method: 'POST', re: /^\/api\/rooms\/([^/]+)\/launch\/?$/, handler: hLaunch, keys: ['code'] },
+  { method: 'POST', re: /^\/api\/rooms\/([^/]+)\/pause\/?$/, handler: hPause, keys: ['code'] },
   { method: 'GET', re: /^\/api\/rooms\/([^/]+)\/state\/?$/, handler: hState, keys: ['code'] },
   { method: 'POST', re: /^\/api\/rooms\/([^/]+)\/join\/?$/, handler: hJoin, keys: ['code'] },
   { method: 'POST', re: /^\/api\/rooms\/([^/]+)\/leave\/?$/, handler: hLeave, keys: ['code'] },
@@ -1111,5 +1596,16 @@ module.exports = {
   SQL,
   ApiError,
   CODE_ALPHABET,
-  TEAM_SIZE
+  TEAM_SIZE,
+  /* v3：管理员密码/令牌与计时（自检与排障用） */
+  hashPassword,
+  verifyPassword,
+  sha256hex,
+  TURN_MIN,
+  TURN_MAX,
+  TURN_DEFAULT,
+  ADMIN_TOKEN_TTL_MS,
+  ADMIN_USER_RE,
+  isLaunched,
+  turnSecondsOf
 };

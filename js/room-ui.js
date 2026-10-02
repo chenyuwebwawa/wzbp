@@ -35,6 +35,11 @@ window.WZ = window.WZ || {};
   var lobbyRooms = null;
   var lobbyError = '';
   var styleInjected = false;
+  /* 管理员：本机记住上次的账号名，token 只留在 net 的内存里（不写 localStorage） */
+  var adminUser = '';
+  var adminError = '';
+  /* 自动计时：用服务端 remainingMs 起算，本地每秒递减；每次收到 state 校准 */
+  var clock = { deadline: 0, seconds: 0, remain: 0, paused: false, ticker: 0, over: false };
 
   var MODES = [
     { id: 'ranked', name: '排位征召' },
@@ -42,8 +47,15 @@ window.WZ = window.WZ || {};
     { id: 'peak', name: '巅峰赛' },
     { id: 'random', name: '随机征召' }
   ];
-  var MODE_NAME = { ranked: '排位征召', kpl: 'KPL 全局 BP', peak: '巅峰赛', random: '随机征召' };
-  var STATUS_NAME = { waiting: '等待中', drafting: 'BP 中', finished: '已结束' };
+  var MODE_NAME = { ranked: '排位征召', kpl: '全局 BP', peak: '巅峰赛', random: '随机征召' };
+  var STATUS_NAME = { waiting: '等待管理员开始', drafting: 'BP 中', finished: '已结束' };
+  /* 建房时可选：赛制 + 每步倒计时（契约 §3.1：30..300，0 = 不限时） */
+  var TURN_CHOICES = [
+    { v: 30, t: '30 秒' }, { v: 45, t: '45 秒' }, { v: 60, t: '60 秒（默认）' },
+    { v: 90, t: '90 秒' }, { v: 120, t: '120 秒' }, { v: 0, t: '不限时' }
+  ];
+  /* 本机记住上次用过的管理员账号名（token 绝不记，避免共用电脑串号） */
+  var LAST_ADMIN_USER_KEY = 'wzbp.admin.user';
 
   /* ------------------------------------------------------------
      基础小工具（不依赖 WZ.util 的加载顺序，各自兜底）
@@ -170,7 +182,52 @@ window.WZ = window.WZ || {};
     '.wz-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }',
     '.wz-toast.err { border-color: #6d2a2d; color: #ffc7ce; }',
     '.wz-toast.warn { border-color: #6b4a1c; color: #ffe0a8; }',
-    '.wz-float-entry { position: fixed; right: 14px; bottom: 14px; z-index: 70; }'
+    '.wz-float-entry { position: fixed; right: 14px; bottom: 14px; z-index: 70; }',
+
+    /* ---------- v3：等待开局 / 管理员 / 自动计时 / 全局 BP 记录 ---------- */
+    '.wz-banner { margin-bottom: 12px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);',
+    '  background: var(--panel-2); font-size: 13px; line-height: 1.6; }',
+    '.wz-banner .wz-banner-h { font-size: 14px; font-weight: 800; margin-bottom: 3px; }',
+    '.wz-banner.wait { border-color: #6b4a1c; background: linear-gradient(135deg, rgba(240,166,60,.14), rgba(240,166,60,.04)); }',
+    '.wz-banner.wait .wz-banner-h { color: #ffd894; }',
+    '.wz-banner.live { border-color: rgba(61,220,132,.45); background: linear-gradient(135deg, rgba(61,220,132,.13), rgba(61,220,132,.03)); }',
+    '.wz-banner.live .wz-banner-h { color: #9df3c5; }',
+    '.wz-banner.done { border-color: #35486a; }',
+    '.wz-admin-box { padding: 9px 11px; border-radius: 10px; border: 1px dashed var(--line); background: var(--panel-2); }',
+    '.wz-admin-box.on { border-style: solid; border-color: rgba(255,201,102,.5); background: rgba(255,201,102,.07); }',
+    '.wz-admin-who { font-size: 13px; color: var(--gold); font-weight: 700; }',
+    '.wz-launch { width: 100%; margin-top: 8px; padding: 13px; font-size: 16px; font-weight: 800; letter-spacing: 2px; }',
+    '.wz-launch[disabled] { opacity: .5; }',
+    '.wz-turn { display: flex; align-items: center; gap: 12px; padding: 11px 13px; border-radius: 11px;',
+    '  border: 1px solid var(--line); background: var(--panel-2); }',
+    '.wz-turn.blue { border-color: rgba(58,160,255,.55); background: linear-gradient(135deg, rgba(58,160,255,.16), rgba(58,160,255,.04)); }',
+    '.wz-turn.red { border-color: rgba(255,77,94,.55); background: linear-gradient(135deg, rgba(255,77,94,.16), rgba(255,77,94,.04)); }',
+    '.wz-turn .t-main { flex: 1 1 auto; min-width: 0; }',
+    '.wz-turn .t-who { font-size: 15px; font-weight: 800; }',
+    '.wz-turn .t-sub { margin-top: 2px; font-size: 12px; color: var(--text-dim); }',
+    '.wz-turn .t-step { font-family: var(--font-num); font-size: 12px; color: var(--text-faint); }',
+    '.wz-clock { flex: 0 0 auto; min-width: 78px; text-align: right; font-family: var(--font-num);',
+    '  font-size: 30px; font-weight: 800; line-height: 1; color: var(--text); }',
+    '.wz-clock.warn { color: var(--warn); }',
+    '.wz-clock.over { color: var(--red); animation: wzPulse 1s infinite; }',
+    '.wz-clock.off { font-size: 15px; color: var(--text-faint); }',
+    '@keyframes wzPulse { 0%,100% { opacity: 1 } 50% { opacity: .45 } }',
+    '.wz-locked { margin-top: 8px; padding: 10px 12px; border-radius: 9px; border: 1px dashed #6b4a1c;',
+    '  background: rgba(240,166,60,.07); color: #ffd894; font-size: 12.5px; line-height: 1.7; }',
+    '.wz-global { padding: 10px 11px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel-2); }',
+    '.wz-global-h { display: flex; justify-content: space-between; gap: 8px; font-size: 12.5px; margin-bottom: 7px; }',
+    '.wz-global-h .b { color: #a9d6ff; font-weight: 700; }',
+    '.wz-global-h .r { color: #ffc3ca; font-weight: 700; }',
+    '.wz-global-row { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 7px; }',
+    '.wz-global-row:last-child { margin-bottom: 0; }',
+    '.wz-chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 7px 2px 3px; border-radius: 999px;',
+    '  border: 1px solid var(--line); background: var(--panel); font-size: 11.5px; color: var(--text-dim); }',
+    '.wz-chip img { width: 18px; height: 18px; border-radius: 50%; object-fit: cover; background: var(--panel-3); }',
+    '.wz-chip.blue { border-color: rgba(58,160,255,.42); }',
+    '.wz-chip.red { border-color: rgba(255,77,94,.42); }',
+    '.wz-chip.none { border-style: dashed; color: var(--text-faint); }',
+    '.wz-sec.wz-dim { opacity: .55; }',
+    '.wz-lock-note { margin-top: 6px; color: #ffd894; font-size: 12px; }'
   ].join('\n');
 
   function injectStyle() {
@@ -371,21 +428,46 @@ window.WZ = window.WZ || {};
     var nameEl = document.getElementById('wzNewName');
     var modeEl = document.getElementById('wzNewMode');
     var boEl = document.getElementById('wzNewBo');
+    var turnEl = document.getElementById('wzNewTurn');
+    var auEl = document.getElementById('wzNewAdminUser');
+    var apEl = document.getElementById('wzNewAdminPass');
     var nickEl = document.getElementById('wzNick');
     if (nickEl) WZ.net.setName(nickEl.value);
+
+    /* 管理员账号是建房必填项（契约 §3.0.1）——先在本地挡一道，别白跑一趟服务器 */
+    var au = auEl ? String(auEl.value || '').trim() : '';
+    var ap = apEl ? String(apEl.value || '') : '';
+    if (!/^[A-Za-z0-9_]{3,20}$/.test(au)) {
+      toast('管理员账号要 3~20 位，只能用字母、数字、下划线', 'err', 4200);
+      if (auEl) auEl.focus();
+      return;
+    }
+    if (ap.length < 6 || ap.length > 64) {
+      toast('管理员密码要 6~64 位', 'err', 4200);
+      if (apEl) apEl.focus();
+      return;
+    }
+
     busy = true;
     render();
     WZ.net.createRoom({
       name: nameEl ? nameEl.value : '',
       mode: modeEl ? modeEl.value : 'ranked',
       seriesCount: boEl ? Number(boEl.value) : 1,
+      turnSeconds: turnEl ? Number(turnEl.value) : 60,
+      adminUser: au,
+      adminPass: ap,
       nickname: WZ.net.myName()
     }).then(function (res) {
       var code = res && res.room && res.room.code;
       if (!code) throw new Error('服务端没有返回房间号');
       roomCode = String(code).toUpperCase();
       pendingCode = '';
-      toast('房间已创建：' + roomCode + '，正在自动占一个席位', 'ok', 3200);
+      adminUser = au;
+      try { WZ.util.store.set(LAST_ADMIN_USER_KEY, au); } catch (e) { /* 忽略 */ }
+      /* 建房时服务端会把 adminToken 一并返回，这里自己就是管理员 */
+      if (res.adminToken && WZ.net.setAdminToken) WZ.net.setAdminToken(res.adminToken, au, roomCode);
+      toast('房间已创建：' + roomCode + '　你是管理员「' + au + '」，等队员加入后点「开始 BP」', 'ok', 5200);
       return WZ.net.joinRoom(roomCode, { team: 'auto' });
     }).then(function () {
       busy = false;
@@ -519,17 +601,307 @@ window.WZ = window.WZ || {};
   }
 
   /* ------------------------------------------------------------
-     渲染
+     v3：管理员 + 开局 + 自动计时 + 全局 BP 记录
      ------------------------------------------------------------ */
+
+  function isAdmin() {
+    return !!(lastState && lastState.admin && lastState.admin.you);
+  }
+
+  /* 用服务端 remainingMs 校准本地倒计时（不信任本机时钟绝对值，只信任「还剩多久」） */
+  function syncClock(game) {
+    var turn = (game && game.turn) || null;
+    clock.seconds = turn && typeof turn.seconds === 'number' ? turn.seconds : 0;
+    clock.paused = !!(lastState && lastState.room && lastState.room.paused);
+    if (!turn || typeof turn.remainingMs !== 'number' || clock.seconds <= 0) {
+      clock.deadline = 0;
+      clock.remain = 0;
+      clock.over = false;
+      return;
+    }
+    clock.deadline = Date.now() + Math.max(0, turn.remainingMs);
+    clock.remain = Math.max(0, Math.round(turn.remainingMs / 1000));
+    clock.over = turn.remainingMs <= 0;
+  }
+
+  function startTicker() {
+    if (clock.ticker) return;
+    clock.ticker = setInterval(function () {
+      if (!clock.deadline) return;
+      var ms = clock.deadline - Date.now();
+      var sec = Math.max(0, Math.ceil(ms / 1000));
+      if (sec === clock.remain) return;
+      clock.remain = sec;
+      clock.over = ms <= 0;
+      paintClock();
+    }, 250);
+  }
+
+  function stopTicker() {
+    if (clock.ticker) { clearInterval(clock.ticker); clock.ticker = 0; }
+  }
+
+  /* 只更新倒计时那一个节点，不整树重绘——否则输入框会掉焦点 */
+  function paintClock() {
+    var el = document.getElementById('wzClock');
+    if (!el) return;
+    if (!clock.deadline || clock.seconds <= 0) {
+      el.className = 'wz-clock off';
+      el.textContent = clock.paused ? '已暂停' : '不限时';
+      return;
+    }
+    var m = Math.floor(clock.remain / 60);
+    var sec = clock.remain % 60;
+    el.textContent = (m > 0 ? m + ':' + (sec < 10 ? '0' : '') + sec : String(clock.remain) + 's');
+    el.className = 'wz-clock' + (clock.over ? ' over' : (clock.remain <= 10 ? ' warn' : ''));
+    if (clock.over && el.title !== '超时') {
+      el.title = '超时';
+      toast('本步超时了（不会自动替你选，请尽快落子）', 'warn', 3000);
+    }
+  }
+
+  function doAdminLogin() {
+    if (busy || !online || !roomCode) return;
+    var u = document.getElementById('wzAdminUser');
+    var p = document.getElementById('wzAdminPass');
+    var user = u ? String(u.value || '').trim() : '';
+    var pass = p ? String(p.value || '') : '';
+    adminError = '';
+    if (!user || !pass) { adminError = '请填管理员账号和密码'; render(); return; }
+    busy = true;
+    render();
+    WZ.net.adminLogin(roomCode, user, pass).then(function (res) {
+      busy = false;
+      adminUser = user;
+      try { WZ.util.store.set(LAST_ADMIN_USER_KEY, user); } catch (e) { /* 忽略 */ }
+      toast('管理员登录成功：' + user, 'ok', 3000);
+      return loadState();
+    }).then(function () { render(); }).catch(function (err) {
+      busy = false;
+      adminError = describe(err);
+      toast(adminError, 'err', 4200);
+      render();
+    });
+  }
+
+  function doAdminLogout() {
+    WZ.net.adminLogout(roomCode);
+    adminError = '';
+    toast('已退出管理员', 'ok');
+    render();
+  }
+
+  function doLaunch() {
+    if (busy || !online || !roomCode) return;
+    busy = true;
+    render();
+    WZ.net.launchRoom(roomCode).then(function () {
+      busy = false;
+      toast('BP 开始！按顺序轮流 ban/pick', 'ok', 3200);
+      return loadState();
+    }).then(function () { loadSeries(); render(); }).catch(function (err) {
+      busy = false;
+      toast(describe(err), 'err', 4200);
+      render();
+    });
+  }
+
+  function doPause(next) {
+    WZ.net.pauseRoom(roomCode, next).then(function () {
+      toast(next ? '已暂停计时' : '已继续', 'ok');
+      return loadState();
+    }).then(function () { render(); }).catch(function (err) { toast(describe(err), 'err'); });
+  }
+
+  /* 管理员登录区（未开局/已开局都要能看到并能登录） */
+  function adminSection(st, room) {
+    var sec = mk('section', 'wz-sec');
+    sec.appendChild(mk('h4', 'wz-sec-h', '管理员'));
+
+    var box = mk('div', 'wz-admin-box' + (isAdmin() ? ' on' : ''));
+    if (isAdmin()) {
+      var row = mk('div', 'wz-row');
+      row.appendChild(mk('span', 'wz-admin-who', '管理员：' + (WZ.net.adminUser() || adminUser || '已登录')));
+      box.appendChild(row);
+      var rowB = mk('div', 'wz-btn-row');
+      var out = mk('button', 'btn btn-ghost', '退出管理员');
+      out.type = 'button';
+      out.addEventListener('click', doAdminLogout);
+      rowB.appendChild(out);
+      box.appendChild(rowB);
+      sec.appendChild(box);
+
+      /* 未开局 → 大按钮「开始 BP」 */
+      if (!room.launched && room.status !== 'finished') {
+        var launch = mk('button', 'btn btn-primary wz-launch', '开 始  B P');
+        launch.type = 'button';
+        launch.id = 'wzLaunchBtn';
+        launch.disabled = !!busy;
+        launch.title = (st.players || []).length
+          ? '点这里让所有人进入 BP（之后按王者征召顺序轮流 ban/pick）'
+          : '还没有队员入座，可以先开始也可以等一会儿';
+        launch.addEventListener('click', doLaunch);
+        sec.appendChild(launch);
+        sec.appendChild(mk('div', 'wz-hint', '点「开始 BP」后，所有人的操作面板才会解锁，并且每步自动倒计时。'));
+      }
+    } else {
+      var hint = mk('div', 'wz-hint',
+        '只有管理员能开局与暂停。若你是本房管理员，请用建房时填的账号登录：');
+      box.appendChild(hint);
+      var r1 = mk('div', 'wz-row');
+      r1.appendChild(mk('label', '', '账号'));
+      var u = mk('input', 'wz-input');
+      u.id = 'wzAdminUser';
+      u.type = 'text';
+      u.maxLength = 20;
+      u.autocomplete = 'off';
+      u.value = WZ.net.adminUser() || adminUser || (function () {
+        try { return WZ.util.store.get(LAST_ADMIN_USER_KEY) || ''; } catch (e) { return ''; }
+      })();
+      u.placeholder = '建房时填的管理员账号';
+      r1.appendChild(u);
+      box.appendChild(r1);
+      var r2 = mk('div', 'wz-row');
+      r2.appendChild(mk('label', '', '密码'));
+      var p = mk('input', 'wz-input');
+      p.id = 'wzAdminPass';
+      p.type = 'password';
+      p.maxLength = 64;
+      p.autocomplete = 'current-password';
+      p.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') doAdminLogin(); });
+      r2.appendChild(p);
+      box.appendChild(r2);
+      if (adminError) box.appendChild(mk('div', 'wz-err', adminError));
+      var rb = mk('div', 'wz-btn-row');
+      var login = mk('button', 'btn btn-primary', busy ? '登录中…' : '管理员登录');
+      login.type = 'button';
+      login.id = 'wzAdminLoginBtn';
+      login.disabled = !!busy;
+      login.addEventListener('click', doAdminLogin);
+      rb.appendChild(login);
+      box.appendChild(rb);
+      sec.appendChild(box);
+      if (!room.launched && room.status !== 'finished') {
+        var locked = mk('div', 'wz-locked', '⏳ 等待管理员开始 BP —— 现在还不能 ban/pick。请先在下面加入队伍。');
+        sec.appendChild(locked);
+      }
+    }
+    return sec;
+  }
+
+  /* 当前轮到谁 / 第几手 / 倒计时 */
+  function turnSection(st, room) {
+    var sec = mk('section', 'wz-sec');
+    var game = st.game || {};
+    var acts = st.actions || [];
+    var order = (st.series && st.series.order) || [];
+    var total = order.length || 0;
+    var na = game.nextAction;
+
+    var side = na && na.side === 'both' ? 'both' : (na ? na.side : null);
+    var cls = side === 'blue' ? ' blue' : (side === 'red' ? ' red' : '');
+    var box = mk('div', 'wz-turn' + cls);
+
+    var main = mk('div', 't-main');
+    var who;
+    if (game.done || room.status === 'finished') who = '本局 BP 已结束';
+    else if (!room.launched) who = '尚未开始（等管理员）';
+    else if (na) who = '轮到 ' + sideLabel(na.side) + ' ' + actionLabel(na.action);
+    else who = '等待中';
+    main.appendChild(mk('div', 't-who', who));
+
+    var subText = '';
+    if (room.launched && na) {
+      subText = '请' + sideLabel(na.side) + '在英雄列表里点英雄，然后选「' + actionLabel(na.action) + '」';
+      /* 不是自己回合时把原因说清楚，别只是灰着 */
+      var me = st.me;
+      if (me && me.team && na.side !== 'both' && me.team !== na.side) {
+        subText = '现在还轮不到你（你是' + sideLabel(me.team) + '），等' + sideLabel(na.side) + '先操作';
+      }
+    } else if (!room.launched) {
+      subText = '管理员点「开始 BP」后才解锁操作';
+    }
+    if (subText) main.appendChild(mk('div', 't-sub', subText));
+    if (total) {
+      main.appendChild(mk('div', 't-step',
+        '第 ' + Math.min(acts.length + (game.done ? 0 : 1), total) + ' 手 / 共 ' + total + ' 手' +
+        (clock.paused ? ' · 已暂停' : '')));
+    }
+    box.appendChild(main);
+
+    var ck = mk('div', 'wz-clock off', '—');
+    ck.id = 'wzClock';
+    box.appendChild(ck);
+    sec.appendChild(box);
+
+    if (total) {
+      var bar = mk('div', 'wz-progress');
+      var fill = mk('i', '');
+      fill.style.width = Math.min(100, Math.round(acts.length / total * 100)) + '%';
+      bar.appendChild(fill);
+      sec.appendChild(bar);
+    }
+    paintClock();
+    return sec;
+  }
+
+  /* 全局 BP 记录：本系列赛各队已选过的英雄（跨局累计） */
+  function globalSection(st, room) {
+    var game = st.game || {};
+    var order0 = (st.series && st.series.order) || [];
+    var isGlobal = !!game.global || room.mode === 'kpl';
+    if (!isGlobal) return null;
+
+    var used = game.globalUsed || { blue: [], red: [] };
+    var sec = mk('section', 'wz-sec');
+    sec.appendChild(mk('h4', 'wz-sec-h', '全局 BP 记录（跨局累计，选过就不能再选）'));
+
+    var box = mk('div', 'wz-global');
+    var head = mk('div', 'wz-global-h');
+    head.appendChild(mk('span', 'b', '蓝方已用 ' + ((used.blue || []).length) + ' 个'));
+    head.appendChild(mk('span', 'r', '红方已用 ' + ((used.red || []).length) + ' 个'));
+    box.appendChild(head);
+
+    [['blue', 'b'], ['red', 'r']].forEach(function (pair) {
+      var side = pair[0];
+      var rowEl = mk('div', 'wz-global-row');
+      var list = used[side] || [];
+      if (!list.length) {
+        rowEl.appendChild(mk('span', 'wz-chip none', sideLabel(side) + '：还没选过人'));
+      } else {
+        list.forEach(function (id) {
+          var hero = WZ.util.heroById(id);
+          var chip = mk('span', 'wz-chip ' + side);
+          if (hero && hero.avatar) {
+            var img = document.createElement('img');
+            img.src = hero.avatar;
+            img.alt = '';
+            img.loading = 'lazy';
+            chip.appendChild(img);
+          }
+          chip.appendChild(document.createTextNode(hero ? hero.name : ('#' + id)));
+          chip.title = (hero ? hero.name : id) + '：已被' + sideLabel(side) +
+            '在本系列赛选用，' + sideLabel(side) + '后续小局不能再选（禁用不受影响）';
+          rowEl.appendChild(chip);
+        });
+      }
+      box.appendChild(rowEl);
+    });
+    sec.appendChild(box);
+    sec.appendChild(mk('div', 'wz-hint',
+      '规则：本方选过的英雄本方后续小局不能再选；对方选过的不受影响；上一局被 ban 的英雄本局仍可选。'));
+    return sec;
+  }
+
 
   function render() {
     if (!dom.body) return;
     try {
       updateHead();
       dom.body.innerHTML = '';
-      if (!online) renderOffline();
-      else if (roomCode) renderRoom();
-      else renderLobby();
+      if (!online) { stopTicker(); renderOffline(); }
+      else if (roomCode) { startTicker(); renderRoom(); }
+      else { stopTicker(); renderLobby(); }
       updateEntry();
     } catch (e) {
       console.error('[room] render failed', e);
@@ -626,11 +998,21 @@ window.WZ = window.WZ || {};
       var box = mk('div', 'wz-code-box');
       var sub = mk('div', 'wz-code-sub');
       sub.appendChild(mk('div', 'wz-code', pendingCode));
-      sub.appendChild(mk('div', 'wz-hint', '点右侧按钮即可入座（自动挑人少的一队）'));
+      var line = pendingInfo
+        ? (pendingInfo.name + ' · ' + (MODE_NAME[pendingInfo.mode] || pendingInfo.mode) +
+           ' · BO' + pendingInfo.seriesCount + ' · 已有 ' + pendingInfo.players + ' 人' +
+           (pendingInfo.launched ? ' · 已开局' : ' · 等管理员开局'))
+        : '点右侧按钮加入，然后在蓝方/红方点一个空位坐下';
+      sub.appendChild(mk('div', 'wz-hint', line));
+      sub.appendChild(mk('div', 'wz-hint',
+        '加入后你就是「队伍成员」；要开始 BP 得等管理员点「开始 BP」。'));
       box.appendChild(sub);
-      var go = mk('button', 'btn btn-primary', '加入');
+      var go = mk('button', 'btn btn-primary', '加入房间');
       go.type = 'button';
-      go.addEventListener('click', function () { joinRoom(pendingCode, 'auto'); });
+      go.addEventListener('click', function () {
+        pendingInfo = null;
+        joinRoom(pendingCode, 'auto');
+      });
       box.appendChild(go);
       secInv.appendChild(box);
       s.appendChild(secInv);
@@ -674,6 +1056,47 @@ window.WZ = window.WZ || {};
     boSel.value = '1';
     r3.appendChild(boSel);
     secNew.appendChild(r3);
+    secNew.appendChild(mk('div', 'wz-hint', 'BO几 就是这轮要打几局；每局都单独 BP，全局 BP 的记录跨局累计。'));
+
+    var r4 = mk('div', 'wz-row');
+    r4.appendChild(mk('label', '', '每步限时'));
+    var turnSel = mk('select', 'wz-select');
+    turnSel.id = 'wzNewTurn';
+    TURN_CHOICES.forEach(function (c) {
+      var o3 = mk('option', '', c.t);
+      o3.value = String(c.v);
+      turnSel.appendChild(o3);
+    });
+    turnSel.value = '60';
+    r4.appendChild(turnSel);
+    secNew.appendChild(r4);
+
+    /* 管理员账号：建房的人就是管理员，只有他能开局 */
+    secNew.appendChild(mk('h4', 'wz-sec-h', '管理员账号（建房的人就是管理员）'));
+    var r5 = mk('div', 'wz-row');
+    r5.appendChild(mk('label', '', '账号'));
+    var au = mk('input', 'wz-input');
+    au.id = 'wzNewAdminUser';
+    au.type = 'text';
+    au.maxLength = 20;
+    au.autocomplete = 'off';
+    au.placeholder = '3~20 位字母数字下划线';
+    try { au.value = WZ.util.store.get(LAST_ADMIN_USER_KEY) || ''; } catch (e) { /* 忽略 */ }
+    r5.appendChild(au);
+    secNew.appendChild(r5);
+    var r6 = mk('div', 'wz-row');
+    r6.appendChild(mk('label', '', '密码'));
+    var ap = mk('input', 'wz-input');
+    ap.id = 'wzNewAdminPass';
+    ap.type = 'password';
+    ap.maxLength = 64;
+    ap.autocomplete = 'new-password';
+    ap.placeholder = '6~64 位，开局与暂停要用';
+    ap.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') createRoom(); });
+    r6.appendChild(ap);
+    secNew.appendChild(r6);
+    secNew.appendChild(mk('div', 'wz-hint',
+      '建房后你就是管理员：等大家加入队伍，再由你点「开始 BP」——这就是「管理员开启房间之后才开始 BP」。'));
 
     var rowBtn = mk('div', 'wz-btn-row');
     var createBtn = mk('button', 'btn btn-primary', busy ? '正在建房…' : '创建并进入');
@@ -810,13 +1233,47 @@ window.WZ = window.WZ || {};
 
     var room = st.room || {};
 
-    /* 房间号 + 邀请链接 */
+    /* 每次重绘前用服务端值校准倒计时 */
+    syncClock(st.game);
+
+    /* ---------- ① 顶部状态条：现在到底在等什么，一眼看清 ---------- */
+    var banner = mk('div', 'wz-banner');
+    var launched = !!room.launched;
+    var finished = room.status === 'finished';
+    var gameNow = Number(room.currentGame || (st.series && st.series.gameNo) || 1);
+    var boAll = Number(room.seriesCount || 1);
+    if (finished) {
+      banner.className = 'wz-banner done';
+      banner.appendChild(mk('div', 'wz-banner-h', '系列赛已结束'));
+      banner.appendChild(mk('div', 'wz-hint', 'BO' + boAll + ' 已打完，可以去「战绩」看回放。'));
+    } else if (!launched) {
+      banner.className = 'wz-banner wait';
+      banner.appendChild(mk('div', 'wz-banner-h', '⏳ 等待管理员开始 BP'));
+      var bp = st.players || [];
+      var nb = 0, nr = 0;
+      bp.forEach(function (p) { if (p.team === 'blue') nb++; else if (p.team === 'red') nr++; });
+      banner.appendChild(mk('div', 'wz-hint',
+        '先加入队伍（下面点空位坐下）：蓝方 ' + nb + ' 人 · 红方 ' + nr + ' 人　·　' +
+        (MODE_NAME[room.mode] || room.mode) + ' · BO' + boAll +
+        (room.turnSeconds ? ' · 每步 ' + room.turnSeconds + ' 秒' : ' · 不限时')));
+      banner.appendChild(mk('div', 'wz-hint',
+        isAdmin() ? '你是管理员，点下面那个大按钮就能开始。'
+          : '等管理员点「开始 BP」。如果管理员就是你，请在下面登录。'));
+    } else {
+      banner.className = 'wz-banner live';
+      banner.appendChild(mk('div', 'wz-banner-h', '● BP 进行中'));
+      banner.appendChild(mk('div', 'wz-hint',
+        '第 ' + gameNow + ' 局 / BO' + boAll + '　·　' + (MODE_NAME[room.mode] || room.mode) +
+        (room.paused ? '　·　已暂停' : '')));
+    }
+    s.appendChild(banner);
+
+    /* ---------- ② 房间号 + 邀请链接 ---------- */
     var secCode = mk('section', 'wz-sec');
     var box = mk('div', 'wz-code-box');
     var sub = mk('div', 'wz-code-sub');
     sub.appendChild(mk('div', 'wz-code', roomCode));
-    sub.appendChild(mk('div', 'wz-hint',
-      '房间号共 6 位（去掉易混字符），把邀请链接发给队友即可入座'));
+    sub.appendChild(mk('div', 'wz-hint', '把邀请链接发给队友，他们打开后点空位就能加入队伍'));
     box.appendChild(sub);
     secCode.appendChild(box);
     var rowCode = mk('div', 'wz-btn-row');
@@ -835,41 +1292,13 @@ window.WZ = window.WZ || {};
     secCode.appendChild(rowCode);
     s.appendChild(secCode);
 
-    /* 我的身份 */
-    var me = st.me;
-    var secMe = mk('section', 'wz-sec');
-    secMe.appendChild(mk('h4', 'wz-sec-h', '我的身份'));
-    if (me) {
-      var kvs = mk('div', 'wz-kv');
-      secMe.appendChild(kvs);
-      var b1 = mk('span', '', '');
-      b1.appendChild(document.createTextNode('昵称 '));
-      b1.appendChild(mk('b', '', me.nickname || WZ.net.myName()));
-      kvs.appendChild(b1);
-      var b2 = mk('span', '', '');
-      b2.appendChild(document.createTextNode('位置 '));
-      b2.appendChild(mk('b', '', sideLabel(me.team) + ' ' + (Number(me.slot) + 1) + ' 号位'));
-      kvs.appendChild(b2);
-    } else {
-      secMe.appendChild(mk('div', 'wz-hint', '你还在旁观。点下面任一队的空位即可落座。'));
-      var specRow = mk('div', 'wz-btn-row');
-      ['blue', 'red'].forEach(function (side) {
-        var b = mk('button', 'btn btn-ghost', '自动加入' + sideLabel(side));
-        b.type = 'button';
-        b.addEventListener('click', function () { joinRoom(roomCode, side); });
-        specRow.appendChild(b);
-      });
-      var auto = mk('button', 'btn btn-primary', '自动入座');
-      auto.type = 'button';
-      auto.addEventListener('click', function () { joinRoom(roomCode, 'auto'); });
-      specRow.appendChild(auto);
-      secMe.appendChild(specRow);
-    }
-    s.appendChild(secMe);
+    /* ---------- ③ 轮到谁 + 倒计时 ---------- */
+    s.appendChild(turnSection(st, room));
 
-    /* 席位 */
+    /* ---------- ④ 战队席位（先加入队伍） ---------- */
     var secSeats = mk('section', 'wz-sec');
-    secSeats.appendChild(mk('h4', 'wz-sec-h', '战队席位（点空位坐下）'));
+    secSeats.appendChild(mk('h4', 'wz-sec-h',
+      launched ? '战队席位' : '加入队伍（点空位坐下）'));
     var teams = mk('div', 'wz-teams');
     teams.appendChild(teamEl(st, 'blue'));
     teams.appendChild(teamEl(st, 'red'));
@@ -878,30 +1307,42 @@ window.WZ = window.WZ || {};
       '在线 ' + onlineCount(st) + ' / ' + (((st.players || []).length) || 0) + ' 人' +
       ' · 绿点在线、灰点离线（离线席位不会被自动释放）');
     secSeats.appendChild(memHint);
+    var me = st.me;
+    if (!me) {
+      var specRow = mk('div', 'wz-btn-row');
+      ['blue', 'red'].forEach(function (side) {
+        var b = mk('button', 'btn btn-ghost', '自动加入' + sideLabel(side));
+        b.type = 'button';
+        b.addEventListener('click', function () { joinRoom(roomCode, side); });
+        specRow.appendChild(b);
+      });
+      var auto = mk('button', 'btn btn-primary', '随便给我个位置');
+      auto.type = 'button';
+      auto.addEventListener('click', function () { joinRoom(roomCode, 'auto'); });
+      specRow.appendChild(auto);
+      secSeats.appendChild(specRow);
+      secSeats.appendChild(mk('div', 'wz-hint', '你还在旁观。点上面任一队的空位即可加入队伍。'));
+    } else {
+      var meLine = mk('div', 'wz-kv');
+      var b1 = mk('span', '', '');
+      b1.appendChild(document.createTextNode('我是 '));
+      b1.appendChild(mk('b', '', me.nickname || WZ.net.myName()));
+      b1.appendChild(document.createTextNode('　' + sideLabel(me.team) + ' ' + (Number(me.slot) + 1) + ' 号位'));
+      meLine.appendChild(b1);
+      secSeats.appendChild(meLine);
+    }
     s.appendChild(secSeats);
 
-    /* 系列赛控制台 */
-    var secSeries = mk('section', 'wz-sec');
-    secSeries.appendChild(mk('h4', 'wz-sec-h', '系列赛'));
-    var gameNo = Number(room.currentGame || (st.series && st.series.gameNo) || 1);
-    var bo = Number(room.seriesCount || 1);
-    var kv = mk('div', 'wz-kv');
-    var g1 = mk('span', '', '');
-    g1.appendChild(document.createTextNode('当前 '));
-    g1.appendChild(mk('b', '', '第 ' + gameNo + ' 局'));
-    g1.appendChild(document.createTextNode(' / BO' + bo));
-    kv.appendChild(g1);
-    var st1 = mk('span', '', '');
-    st1.appendChild(document.createTextNode('状态 '));
-    st1.appendChild(mk('b', '', STATUS_NAME[room.status] || room.status || '-'));
-    kv.appendChild(st1);
-    if (room.mode === 'random') {
-      var rm = mk('span', '', '');
-      rm.appendChild(document.createTextNode('赛制 '));
-      rm.appendChild(mk('b', '', '随机征召'));
-      kv.appendChild(rm);
-    }
-    secSeries.appendChild(kv);
+    /* ---------- ⑤ 管理员区（登录 / 开始 BP / 暂停） ---------- */
+    s.appendChild(adminSection(st, room));
+
+    /* ---------- ⑥ 全局 BP 记录 ---------- */
+    var gsec = globalSection(st, room);
+    if (gsec) s.appendChild(gsec);
+
+    /* ---------- ⑦ 系列赛控制台（仅管理员可操作） ---------- */
+    var secSeries = mk('section', 'wz-sec' + (isAdmin() ? '' : ' wz-dim'));
+    secSeries.appendChild(mk('h4', 'wz-sec-h', '系列赛控制台' + (isAdmin() ? '' : '（仅管理员）')));
 
     /* 每局胜负 */
     var winLine = mk('div', 'wz-hint');
@@ -915,30 +1356,15 @@ window.WZ = window.WZ || {};
     }
     secSeries.appendChild(winLine);
 
-    /* 本局进度 */
     var acts = st.actions || [];
-    var order = (st.series && st.series.order) || [];
-    var totalSteps = order.length || (st.game && st.game.totalSteps) || 0;
-    var prog = mk('div', 'wz-hint');
-    var na = st.game && st.game.nextAction;
-    var progText = '本局进度：已落 ' + acts.length + (totalSteps ? ' / ' + totalSteps : '') + ' 手';
-    if (na) progText += ' · 轮到 ' + sideLabel(na.side) + actionLabel(na.action);
-    else if (st.game && st.game.done) progText += ' · 本局 BP 已完成';
-    prog.textContent = progText;
-    secSeries.appendChild(prog);
-    if (totalSteps) {
-      var bar = mk('div', 'wz-progress');
-      var fill = mk('i', '');
-      fill.style.width = Math.min(100, Math.round(acts.length / totalSteps * 100)) + '%';
-      bar.appendChild(fill);
-      secSeries.appendChild(bar);
-    }
+    var totalSteps = ((st.series && st.series.order) || []).length;
 
     /* 控制按钮 */
     var rowCtrl = mk('div', 'wz-btn-row');
     var sel = mk('select', 'wz-select');
     sel.id = 'wzWinner';
     sel.style.flex = '0 0 108px';
+    sel.disabled = !isAdmin();
     [['', '不记胜负'], ['blue', '蓝方胜'], ['red', '红方胜']].forEach(function (p) {
       var o = mk('option', '', p[1]);
       o.value = p[0];
@@ -947,30 +1373,44 @@ window.WZ = window.WZ || {};
     rowCtrl.appendChild(sel);
     var nextBtn = mk('button', 'btn btn-primary', '下一局');
     nextBtn.type = 'button';
-    nextBtn.disabled = room.status === 'finished';
+    nextBtn.disabled = !isAdmin() || finished;
+    nextBtn.title = isAdmin() ? '结算本局并开下一局' : '只有管理员能换局';
     nextBtn.addEventListener('click', doNextGame);
     rowCtrl.appendChild(nextBtn);
     var undoBtn = mk('button', 'btn btn-warn', '撤销上一手');
     undoBtn.type = 'button';
-    undoBtn.disabled = !acts.length;
+    undoBtn.disabled = !isAdmin() || !acts.length;
+    undoBtn.title = isAdmin() ? '撤销最后一手' : '只有管理员能撤销';
     undoBtn.addEventListener('click', doUndo);
     rowCtrl.appendChild(undoBtn);
 
-    var canShuffle = room.mode === 'random' && !acts.length && room.status !== 'finished';
-    var shBtn = mk('button', 'btn btn-ghost', '重新随机顺序');
-    shBtn.type = 'button';
-    shBtn.disabled = !canShuffle;
-    shBtn.title = canShuffle ? '重洗本局 ban/pick 顺序（仅本局未落任何一手时可用）'
-      : (room.mode === 'random' ? '本局已经落子，不能重洗' : '仅「随机征召」模式可用');
-    shBtn.addEventListener('click', doShuffle);
-    rowCtrl.appendChild(shBtn);
+    if (isAdmin()) {
+      var pauseBtn = mk('button', 'btn btn-ghost', room.paused ? '继续计时' : '暂停计时');
+      pauseBtn.type = 'button';
+      pauseBtn.disabled = !launched || finished;
+      pauseBtn.addEventListener('click', function () { doPause(!room.paused); });
+      rowCtrl.appendChild(pauseBtn);
 
-    var finBtn = mk('button', 'btn btn-danger', '结束系列');
-    finBtn.type = 'button';
-    finBtn.disabled = room.status === 'finished';
-    finBtn.addEventListener('click', doFinish);
-    rowCtrl.appendChild(finBtn);
+      var canShuffle = room.mode === 'random' && !acts.length && !finished;
+      var shBtn = mk('button', 'btn btn-ghost', '重新随机顺序');
+      shBtn.type = 'button';
+      shBtn.disabled = !canShuffle;
+      shBtn.title = canShuffle ? '重洗本局 ban/pick 顺序（仅本局未落任何一手时可用）'
+        : (room.mode === 'random' ? '本局已经落子，不能重洗' : '仅「随机征召」模式可用');
+      shBtn.addEventListener('click', doShuffle);
+      rowCtrl.appendChild(shBtn);
+
+      var finBtn = mk('button', 'btn btn-danger', '结束系列');
+      finBtn.type = 'button';
+      finBtn.disabled = finished;
+      finBtn.addEventListener('click', doFinish);
+      rowCtrl.appendChild(finBtn);
+    }
     secSeries.appendChild(rowCtrl);
+    if (!isAdmin()) {
+      secSeries.appendChild(mk('div', 'wz-hint',
+        '换局 / 撤销 / 结束系列都由管理员操作，避免大家同时点导致混乱。'));
+    }
     s.appendChild(secSeries);
 
     /* 战绩入口：回放器已加载时给个直达链接（两个模块互相不硬依赖） */
@@ -1047,6 +1487,11 @@ window.WZ = window.WZ || {};
     if (dom.btn) dom.btn.hidden = !online && !roomCode;
     if (online && !was) {
       ensureSubscribed();
+      /* 带 ?room=CODE 打开页面：若服务端认识我，就静默回到房间（不开抽屉、不打扰），
+         非成员则只把邀请卡片备好，等用户自己点「加入」。 */
+      if (pendingCode && !roomCode && WZ.net && typeof WZ.net.getState === 'function') {
+        loadStateForInvite(pendingCode);
+      }
       if (panel.isOpen()) { render(); if (roomCode) loadState(); }
     } else if (!online && was) {
       subscribedFor = '';
@@ -1111,12 +1556,44 @@ window.WZ = window.WZ || {};
   panel.roomCode = function () { return roomCode; };
   panel.state = function () { return lastState; };
   panel.leave = leaveRoom;
+  /* 从邀请链接（?room=CODE）或外部代码进入房间。
+     设计：**不自动占座**，而是把邀请卡片显示出来，让用户自己点「加入」——
+     避免点错链接就误占一个战队席位。这里只负责把卡片亮出来并补齐大厅数据。 */
   panel.enterRoom = function (code_) {
     var c = String(code_ || '').trim().toUpperCase();
-    if (!c) return;
+    if (!c) return false;
     pendingCode = c;
-    if (!panel.isOpen()) panel.open(); else render();
+    if (!panel.isOpen()) panel.open();
+    if (roomCode === c) { loadState(); loadSeries(); }
+    else if (online) { if (!lobbyRooms) loadRooms(); loadStateForInvite(c); }
+    render();
+    return true;
   };
+
+  /* 邀请卡片要显示「这个房间现在什么情况」，所以先拉一次它的状态给卡片用。
+     另外：如果服务端认识我的 playerKey（我已经在这个房间里 —— 例如刷新页面后
+     再走一遍邀请链接，或先被别处 join 进来），这里直接采纳房间并订阅 SSE。
+     否则页面会停在「加入」卡片上，主控拿不到 state，
+     「未开局锁定 BP 面板」这类依赖 state 的逻辑就永远不会生效。 */
+  function loadStateForInvite(c) {
+    WZ.net.getState(c).then(function (s) {
+      if (!s || !s.room || String(s.room.code).toUpperCase() !== c) { pendingInfo = null; return; }
+      if (s.me) {
+        pendingCode = '';
+        pendingInfo = null;
+        panel.applyState(s);        // 内部会 ensureSubscribed() 并转发 onState
+        return;
+      }
+      pendingInfo = {
+        name: s.room.name || '未命名房间',
+        mode: s.room.mode, seriesCount: s.room.seriesCount,
+        launched: !!s.room.launched,
+        players: (s.players || []).length
+      };
+      render();
+    }).catch(function () { pendingInfo = null; });
+  }
+  var pendingInfo = null;
   panel.refresh = function () {
     if (roomCode) { loadState(); loadSeries(); }
     lobbyRooms = null;
@@ -1138,6 +1615,17 @@ window.WZ = window.WZ || {};
   };
 
   panel.toast = toast;
+
+  /* ---------- v3 新增导出 ---------- */
+  panel.isAdmin = isAdmin;
+  panel.adminLogin = doAdminLogin;
+  panel.adminLogout = doAdminLogout;
+  panel.launch = doLaunch;
+  panel.pause = doPause;
+  panel.launched = function () { return !!(lastState && lastState.room && lastState.room.launched); };
+  panel.turn = function () {
+    return { seconds: clock.seconds, remaining: clock.remain, paused: clock.paused, over: clock.over };
+  };
 
   WZ.roomUI = panel;
 })(window.WZ);

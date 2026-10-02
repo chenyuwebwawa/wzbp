@@ -12,20 +12,22 @@
    ============================================================ */
 'use strict';
 
-const tables = { rooms: [], players: [], series: [], actions: [] };
-const seqs = { rooms: 0, players: 0, series: 0, actions: 0 };
+const tables = { rooms: [], players: [], series: [], actions: [], room_admins: [], admin_tokens: [] };
+const seqs = { rooms: 0, players: 0, series: 0, actions: 0, room_admins: 0, admin_tokens: 0 };
 
 /* ---------------- 与 api.js 完全一致的 SQL 原文 ---------------- */
 
 const SQL = {
   roomByCode: 'SELECT * FROM rooms WHERE code = ? LIMIT 1',
   roomById: 'SELECT * FROM rooms WHERE id = ? LIMIT 1',
-  roomInsert: 'INSERT INTO rooms (code, name, mode, series_count, status, current_game, order_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+  roomInsert: 'INSERT INTO rooms (code, name, mode, series_count, status, current_game, order_json, launched, turn_seconds, paused, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
   roomList: 'SELECT r.*, (SELECT COUNT(*) FROM players p WHERE p.room_id = r.id) AS player_count FROM rooms r ORDER BY r.updated_at DESC, r.id DESC LIMIT 50',
   roomStatus: 'UPDATE rooms SET status = ?, updated_at = ? WHERE id = ?',
   roomGame: 'UPDATE rooms SET current_game = ?, status = ?, updated_at = ? WHERE id = ?',
   roomOrder: 'UPDATE rooms SET order_json = ?, updated_at = ? WHERE id = ?',
   roomTouch: 'UPDATE rooms SET updated_at = ? WHERE id = ?',
+  roomLaunch: "UPDATE rooms SET launched = 1, paused = 0, status = ?, updated_at = ? WHERE id = ?",
+  roomPaused: 'UPDATE rooms SET paused = ?, updated_at = ? WHERE id = ?',
 
   playerList: 'SELECT * FROM players WHERE room_id = ? ORDER BY team ASC, slot ASC',
   playerInsert: 'INSERT INTO players (room_id, player_key, nickname, team, slot, joined_at, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?)',
@@ -44,6 +46,16 @@ const SQL = {
   actionInsert: 'INSERT INTO actions (series_id, seq, step_index, side, `action`, hero_id, hero_name, player_key, nickname, acted_at, gap_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
   actionDelete: 'DELETE FROM actions WHERE id = ?',
   globalPicks: 'SELECT a.side, a.hero_id FROM actions a JOIN series s ON s.id = a.series_id WHERE s.room_id = ? AND a.`action` = ?',
+
+  adminByUser: 'SELECT * FROM room_admins WHERE room_id = ? AND username = ? LIMIT 1',
+  adminById: 'SELECT * FROM room_admins WHERE id = ? LIMIT 1',
+  adminInsert: 'INSERT INTO room_admins (room_id, username, pass_hash, is_owner, created_at) VALUES (?, ?, ?, ?, ?)',
+  adminUsers: 'SELECT username FROM room_admins WHERE room_id = ? ORDER BY id ASC',
+  tokenInsert: 'INSERT INTO admin_tokens (room_id, admin_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?)',
+  tokenByHash: 'SELECT * FROM admin_tokens WHERE token_hash = ? LIMIT 1',
+  tokenLive: 'SELECT token_hash FROM admin_tokens WHERE room_id = ? AND expires_at > ?',
+  tokenDelete: 'DELETE FROM admin_tokens WHERE token_hash = ?',
+  tokenPruneRoom: 'DELETE FROM admin_tokens WHERE room_id = ? AND expires_at <= ?',
 
   recentGames: 'SELECT s.*, r.code AS room_code, r.name AS room_name, (SELECT COUNT(*) FROM actions a WHERE a.series_id = s.id) AS action_count FROM series s JOIN rooms r ON r.id = s.room_id ORDER BY s.started_at DESC, s.id DESC LIMIT 30'
 };
@@ -95,10 +107,14 @@ function reset() {
   tables.players.length = 0;
   tables.series.length = 0;
   tables.actions.length = 0;
+  tables.room_admins.length = 0;
+  tables.admin_tokens.length = 0;
   seqs.rooms = 0;
   seqs.players = 0;
   seqs.series = 0;
   seqs.actions = 0;
+  seqs.room_admins = 0;
+  seqs.admin_tokens = 0;
 }
 
 async function init() {
@@ -147,7 +163,12 @@ function buildHandlers() {
       id: seqs.rooms,
       code, name: p[1], mode: p[2],
       series_count: Number(p[3]), status: p[4], current_game: Number(p[5]),
-      order_json: asJson(p[6]), created_at: p[7], updated_at: p[8]
+      order_json: asJson(p[6]),
+      /* v3：开局闸门与计时配置 */
+      launched: Number(p[7]) ? 1 : 0,
+      turn_seconds: Number(p[8]),
+      paused: Number(p[9]) ? 1 : 0,
+      created_at: p[10], updated_at: p[11]
     });
     return insertOk(seqs.rooms);
   });
@@ -192,6 +213,26 @@ function buildHandlers() {
     const r = byId(tables.rooms, p[1]);
     if (!r) return updateOk(0);
     r.updated_at = p[0];
+    return updateOk(1);
+  });
+
+  /* v3：管理员开局（launched=1、paused=0、status） */
+  h.set(norm(SQL.roomLaunch), function (p) {
+    const r = byId(tables.rooms, p[2]);
+    if (!r) return updateOk(0);
+    r.launched = 1;
+    r.paused = 0;
+    r.status = p[0];
+    r.updated_at = p[1];
+    return updateOk(1);
+  });
+
+  /* v3：暂停/继续 */
+  h.set(norm(SQL.roomPaused), function (p) {
+    const r = byId(tables.rooms, p[2]);
+    if (!r) return updateOk(0);
+    r.paused = Number(p[0]) ? 1 : 0;
+    r.updated_at = p[1];
     return updateOk(1);
   });
 
@@ -341,6 +382,89 @@ function buildHandlers() {
       out.push({ side: a.side, hero_id: Number(a.hero_id) });
     });
     return out;
+  });
+
+  /* ---------------- v3：管理员账号与令牌 ---------------- */
+
+  h.set(norm(SQL.adminByUser), function (p) {
+    const roomId = Number(p[0]);
+    const user = String(p[1]);
+    return rowsCopy(tables.room_admins.filter(function (a) {
+      return Number(a.room_id) === roomId && a.username === user;
+    }).slice(0, 1));
+  });
+
+  h.set(norm(SQL.adminById), function (p) {
+    const a = byId(tables.room_admins, p[0]);
+    return a ? [rowCopy(a)] : [];
+  });
+
+  h.set(norm(SQL.adminInsert), function (p) {
+    const roomId = Number(p[0]);
+    const user = String(p[1]);
+    if (tables.room_admins.some(function (a) { return Number(a.room_id) === roomId && a.username === user; })) {
+      throw dupEntry("Duplicate entry for key 'room_admins.uk_room_user'");
+    }
+    seqs.room_admins += 1;
+    tables.room_admins.push({
+      id: seqs.room_admins, room_id: roomId, username: user,
+      pass_hash: p[2], is_owner: Number(p[3]) ? 1 : 0, created_at: p[4]
+    });
+    return insertOk(seqs.room_admins);
+  });
+
+  h.set(norm(SQL.adminUsers), function (p) {
+    const roomId = Number(p[0]);
+    return tables.room_admins
+      .filter(function (a) { return Number(a.room_id) === roomId; })
+      .sort(function (a, b) { return Number(a.id) - Number(b.id); })
+      .map(function (a) { return { username: a.username }; });
+  });
+
+  h.set(norm(SQL.tokenInsert), function (p) {
+    const hash = String(p[2]);
+    if (tables.admin_tokens.some(function (t) { return t.token_hash === hash; })) {
+      throw dupEntry("Duplicate entry for key 'admin_tokens.uk_token'");
+    }
+    seqs.admin_tokens += 1;
+    tables.admin_tokens.push({
+      id: seqs.admin_tokens, room_id: Number(p[0]), admin_id: Number(p[1]),
+      token_hash: hash, expires_at: p[3], created_at: p[4]
+    });
+    return insertOk(seqs.admin_tokens);
+  });
+
+  h.set(norm(SQL.tokenByHash), function (p) {
+    const hash = String(p[0]);
+    return rowsCopy(tables.admin_tokens.filter(function (t) { return t.token_hash === hash; }).slice(0, 1));
+  });
+
+  h.set(norm(SQL.tokenLive), function (p) {
+    const roomId = Number(p[0]);
+    const now = timeOf(p[1]);
+    return tables.admin_tokens
+      .filter(function (t) { return Number(t.room_id) === roomId && timeOf(t.expires_at) > now; })
+      .map(function (t) { return { token_hash: t.token_hash }; });
+  });
+
+  h.set(norm(SQL.tokenDelete), function (p) {
+    const hash = String(p[0]);
+    let n = 0;
+    for (let i = tables.admin_tokens.length - 1; i >= 0; i--) {
+      if (tables.admin_tokens[i].token_hash === hash) { tables.admin_tokens.splice(i, 1); n += 1; }
+    }
+    return updateOk(n);
+  });
+
+  h.set(norm(SQL.tokenPruneRoom), function (p) {
+    const roomId = Number(p[0]);
+    const now = timeOf(p[1]);
+    let n = 0;
+    for (let i = tables.admin_tokens.length - 1; i >= 0; i--) {
+      const t = tables.admin_tokens[i];
+      if (Number(t.room_id) === roomId && timeOf(t.expires_at) <= now) { tables.admin_tokens.splice(i, 1); n += 1; }
+    }
+    return updateOk(n);
   });
 
   h.set(norm(SQL.recentGames), function () {
