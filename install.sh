@@ -3,8 +3,8 @@
 #  wzbp · 王者荣耀 BP 展示台  —— Linux 一键安装脚本（宝塔面板 / 裸机通用）
 # -----------------------------------------------------------------------------
 #  用法（两种都支持）：
-#    ① GitHub 一键（把 <owner>/<repo> 换成你的仓库，或加 --repo）：
-#       bash <(curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/install.sh) \
+#    ① GitHub 一键（把 chenyuwebwawa/wzbp 换成你的仓库，或加 --repo）：
+#       bash <(curl -fsSL https://raw.githubusercontent.com/chenyuwebwawa/wzbp/main/install.sh) \
 #            --domain bp.example.com
 #    ② 先克隆再跑：
 #       git clone <仓库> wzbp && cd wzbp && sudo bash install.sh --domain bp.example.com
@@ -295,7 +295,7 @@ wzbp · 王者荣耀 BP 展示台 —— Linux 一键安装脚本 v1.0.0
   sudo bash install.sh --domain <域名> [其它参数]
 
 最常用（只填域名，其余全自动）：
-  bash <(curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/install.sh) \
+  bash <(curl -fsSL https://raw.githubusercontent.com/chenyuwebwawa/wzbp/main/install.sh) \
        --domain bp.example.com
   git clone <仓库> wzbp && cd wzbp && sudo bash install.sh --domain bp.example.com
 

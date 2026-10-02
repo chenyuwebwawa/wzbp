@@ -31,14 +31,14 @@
 服务器上装好宝塔面板 + MySQL 后，**一行命令、只需填域名**：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/jouaaaaa/wzbp/main/install.sh) \
+bash <(curl -fsSL https://raw.githubusercontent.com/chenyuwebwawa/wzbp/main/install.sh) \
      --domain bp.example.com
 ```
 
 远程一键模式会自动从仓库拉最新代码；也可以先克隆再装：
 
 ```bash
-git clone https://github.com/jouaaaaa/wzbp.git
+git clone https://github.com/chenyuwebwawa/wzbp.git
 cd wzbp && sudo bash install.sh --domain bp.example.com
 ```
 
