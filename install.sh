@@ -678,17 +678,68 @@ mysql_root_pass_from_panel() {
   return 1
 }
 
-# 能不能用某个密码连上 MySQL（返回 0 = 能）
+# 宝塔的 MySQL root 常常只建在 localhost（socket）上，没有 root@127.0.0.1（TCP）。
+# 这时候即使密码完全正确，用 -h 127.0.0.1 也会被拒 —— 用户看到的就是
+# 「密码明明是对的却连不上」。所以管理员连接要挨个试，试通了记住用哪种。
+ADMIN_LAST_ERR=''
+ADMIN_ARGS=''
+ADMIN_DESC=''
+
+# 候选连接方式（按成功率排序）。每项是一串参数，空串表示客户端默认（socket）。
+admin_conn_variants() {
+  printf '%s\n' \
+    "-h 127.0.0.1 -P ${DB_PORT}" \
+    "--protocol=socket" \
+    "--protocol=socket --socket=/tmp/mysql.sock" \
+    "-h localhost" \
+    "--protocol=socket --socket=/www/server/mysql/mysql.sock"
+}
+
+# 用某个密码，按候选顺序试连接；成功就把方式记进 ADMIN_ARGS。
+# out_var 会写入最后一条真实报错，方便失败时显示给用户看。
+admin_connect_probe() {
+  local pass="$1" variant rc=1
+  ADMIN_ARGS=''
+  ADMIN_DESC=''
+  ADMIN_LAST_ERR=''
+  [ -x "$MYSQL_BIN" ] || { ADMIN_LAST_ERR="找不到 mysql 客户端（${MYSQL_BIN:-未探测到}）"; return 1; }
+
+  while IFS= read -r variant; do
+    [ -n "$variant" ] || continue
+    local -a args=()
+    # shellcheck disable=SC2206
+    args=($variant)
+    local err
+    if [ -n "$pass" ]; then
+      err=$(MYSQL_PWD="$pass" "$MYSQL_BIN" "${args[@]}" -u "$DB_ROOT_USER" \
+        --connect-timeout=5 -N -B -e 'SELECT 1;' 2>&1 >/dev/null)
+    else
+      err=$(MYSQL_PWD='' "$MYSQL_BIN" "${args[@]}" -u "$DB_ROOT_USER" \
+        --connect-timeout=5 -N -B -e 'SELECT 1;' 2>&1 >/dev/null)
+    fi
+    rc=$?
+    if [ $rc -eq 0 ]; then
+      ADMIN_ARGS="$variant"
+      ADMIN_DESC="$variant"
+      return 0
+    fi
+    # 报错优先级：Access denied（密码问题，最有诊断价值）优先保留。
+    # 否则会被后面那条「Can't connect」盖掉，让人误以为是网络/服务没起。
+    if [ -n "$err" ]; then
+      case "$err" in
+        *Access\ denied*|*ER_ACCESS_DENIED*) ADMIN_LAST_ERR="$err" ;;
+        *) [ -z "$ADMIN_LAST_ERR" ] && ADMIN_LAST_ERR="$err" ;;
+      esac
+    fi
+  done <<EOF
+$(admin_conn_variants)
+EOF
+  return 1
+}
+
+# 兼容旧调用：能不能用这个密码连上（任意一种方式）
 mysql_try_pass() {
-  local p="$1"
-  [ -x "$MYSQL_BIN" ] || return 1
-  if [ -n "$p" ]; then
-    "$MYSQL_BIN" -h "$DB_HOST" -P "$DB_PORT" -u "$DB_ROOT_USER" -p"$p" \
-      -e 'SELECT 1;' >/dev/null 2>&1
-  else
-    "$MYSQL_BIN" -h "$DB_HOST" -P "$DB_PORT" -u "$DB_ROOT_USER" \
-      -e 'SELECT 1;' >/dev/null 2>&1
-  fi
+  admin_connect_probe "$1"
 }
 
 # 站点目录能不能被 Nginx 读取？
@@ -964,7 +1015,15 @@ mysql_do() { # mysql_do <admin|app> <描述> <SQL（用 __WZBP_DB_PASSWORD__ 代
     LAST_OUT='找不到 mysql 客户端'
     return 1
   fi
-  LAST_OUT=$(MYSQL_PWD="$p" "$MYSQL_BIN" -h "$DB_HOST" -P "$DB_PORT" -u "$u" \
+  # 管理员连接可能走的是 socket（宝塔常见），用探测好的方式
+  local -a cargs=()
+  if [ "$role" = 'admin' ] && [ -n "$ADMIN_ARGS" ]; then
+    # shellcheck disable=SC2206
+    cargs=($ADMIN_ARGS)
+  else
+    cargs=(-h "$DB_HOST" -P "$DB_PORT")
+  fi
+  LAST_OUT=$(MYSQL_PWD="$p" "$MYSQL_BIN" "${cargs[@]}" -u "$u" \
              --connect-timeout=5 --default-character-set=utf8mb4 -N -B -e "$real_sql" 2>&1)
   rc=$?
   return "$rc"
@@ -978,6 +1037,12 @@ mysql_can_connect() { # mysql_can_connect admin|app
     case "$role" in admin) return 0 ;; *) return 1 ;; esac
   fi
   [ -n "$MYSQL_BIN" ] || return 1
+  if [ "$role" = 'admin' ]; then
+    # 管理员：socket 与 TCP 都试，哪个通用哪个
+    admin_connect_probe "$p"
+    return $?
+  fi
+  # 应用账号：服务是走 TCP 连的，所以必须用 TCP 验证
   MYSQL_PWD="$p" "$MYSQL_BIN" -h "$DB_HOST" -P "$DB_PORT" -u "$u" --connect-timeout=5 -N -B -e 'SELECT 1' >/dev/null 2>&1
   rc=$?
   return "$rc"
@@ -1123,13 +1188,32 @@ step_database() {
       read -r rp || rp=''
       rp=$(printf '%s' "$rp" | tr -d '\r')
       [ -n "$rp" ] || die '没有提供 MySQL 管理员密码' "用 --db-root-pass '<root密码>' 重跑。"
+      # 用密码再试所有连接方式（socket / TCP 都试）
       if ! mysql_try_pass "$rp"; then
+        printf '\n'
+        warn 'MySQL 返回的原始报错（拿这个才能判断到底卡在哪）：'
+        printf '    %s\n' "${ADMIN_LAST_ERR:-（没有输出）}"
+        printf '\n'
+        printf '%s\n' '自己复核一下（在服务器上直接跑，看哪条能通）：'
+        printf '    mysql -uroot -p%s -e "SELECT 1;"                       # socket\n' "'$rp'"
+        printf '    mysql -uroot -p%s -h127.0.0.1 -e "SELECT 1;"           # TCP\n' "'$rp'"
+        printf '    mysql -uroot -p%s -P%s -e "SELECT 1;"                 # 换端口\n' "'$rp'" "$DB_PORT"
         die '这个 root 密码连不上 MySQL' \
-"检查：① 宝塔 → 软件商店 → MySQL 是否「运行中」；② 密码是否复制全（前后别带空格）；
-      ③ 端口是不是 ${DB_PORT}（不是的话加 --db-port）；④ 宝塔 → 数据库 → root 密码 里重新确认。"
+"① 上面两条命令哪条能通？如果只有 socket 能通，那是宝塔的 root 没开 TCP 权限——
+         这不影响安装，改用【先手动建库】的办法绕过（见下）。
+       ② 两条都不通 → 密码不对：宝塔面板 → 数据库 → root 密码 里重新确认（注意不要复制到空格）。
+       ③ 报 Can't connect → MySQL 没在跑，或端口不是 ${DB_PORT}（用 ss -lntp | grep mysql 看）。
+
+       最省事的绕过办法（推荐）——三条命令建好库和用户，然后重跑脚本（它会自动跳过这一步）：
+         mysql -uroot -p -e \"CREATE DATABASE IF NOT EXISTS ${DB_NAME} DEFAULT CHARACTER SET utf8mb4;\"
+         mysql -uroot -p -e \"CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '自己定个密码';\"
+         mysql -uroot -p -e \"CREATE USER IF NOT EXISTS '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '自己定个密码';\"
+         mysql -uroot -p -e \"GRANT ALL ON ${DB_NAME}.* TO '${DB_USER}'@'localhost'; GRANT ALL ON ${DB_NAME}.* TO '${DB_USER}'@'127.0.0.1'; FLUSH PRIVILEGES;\"
+       然后把这四行变量写进 ${DIR}/${ENV_NAME}（密码与上面一致），再跑：
+         bash install.sh --domain ${DOMAIN} --skip-db"
       fi
       DB_ROOT_PASS="$rp"
-      ok 'root 密码验证通过'
+      ok "root 密码验证通过（连接方式：${ADMIN_DESC}）"
     fi
   fi
 
