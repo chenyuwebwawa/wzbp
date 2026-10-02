@@ -47,6 +47,7 @@ DOMAIN=''
 PORT='8787'
 DIR=''
 DIR_GIVEN=0
+IN_PROJECT_DIR=0
 DB_NAME='wzbp'
 DB_USER='wzbp'
 DB_PASS=''
@@ -58,6 +59,9 @@ DB_ROOT_PASS=''
 DB_ROOT_PASS_GIVEN=0
 REPO_URL=''
 TARBALL_URL=''
+# 一键模式（bash <(curl ...)）时脚本不在项目目录里，靠这个默认仓库把代码拉下来。
+# 改了仓库地址记得同步这一行，否则一行命令会失败。
+DEFAULT_REPO='https://github.com/chenyuwebwawa/wzbp.git'
 SERVICE_PREF='auto'
 SSL_EMAIL=''
 NO_NGINX=0
@@ -402,10 +406,11 @@ normalize_and_validate() {
   if [ -z "$REPO_URL" ] && [ -n "${WZBP_REPO:-}" ]; then REPO_URL="$WZBP_REPO"; fi
 
   # 默认目录：脚本所在目录（是项目目录时），否则 /www/wwwroot/wzbp
+  IN_PROJECT_DIR=0
   if [ "$DIR_GIVEN" = 0 ]; then
     DIR=$(script_dir)
     if [ -f "$DIR/server/index.js" ] && [ -f "$DIR/index.html" ]; then
-      : # 从项目目录运行，就地安装
+      IN_PROJECT_DIR=1     # 从项目目录运行，就地安装
     else
       DIR='/www/wwwroot/wzbp'
     fi
@@ -613,20 +618,111 @@ bt_project_registered() {
 }
 
 # 宝塔面板里保存的 MySQL root 密码（尽力而为，找不到就返回 1）
+#
+# 宝塔各版本把密码放在不同地方，这里把已知的都试一遍：
+#   · 8.x/9.x：面板 sqlite 库 default.db 的 config 表（用 mysql 客户端读不出来，
+#     但没有 sqlite3 时退化为直接 grep 二进制里的字符串）
+#   · 常见 json/pl 配置文件
+#   · /root/.my.cnf（很多面板/镜像会写，最可靠）
 mysql_root_pass_from_panel() {
   local f v
-  for f in /www/server/panel/config/mysql.json /www/server/panel/data/mysql_root.pl \
-           /www/server/panel/data/default.pl; do
+
+  # ① /root/.my.cnf —— 命中率最高，先看这里
+  for f in /root/.my.cnf /www/server/mysql/my.cnf; do
     [ -f "$f" ] || continue
-    if [ "${f##*.}" = 'json' ]; then
-      v=$(tr ',{}' '\n\n\n' < "$f" 2>/dev/null | sed -n 's/.*"mysql_root"[ ]*:[ ]*"\([^"]*\)".*/\1/p' | head -n 1)
-      [ -z "$v" ] && v=$(tr ',{}' '\n\n\n' < "$f" 2>/dev/null | sed -n 's/.*"root"[ ]*:[ ]*"\([^"]*\)".*/\1/p' | head -n 1)
-    else
-      v=$(head -n 1 "$f" 2>/dev/null | tr -d '\r\n')
-    fi
+    v=$(sed -n 's/^[[:space:]]*password[[:space:]]*=[[:space:]]*["'"'"']\?\([^"'"'"'[:space:]]*\)["'"'"']\?.*/\1/p' "$f" 2>/dev/null | head -n 1)
+    [ -n "$v" ] && { printf '%s' "$v"; return 0; }
+  done
+
+  # ② 配置文件
+  for f in /www/server/panel/config/mysql.json \
+           /www/server/panel/data/mysql_root.pl \
+           /www/server/panel/data/default.pl \
+           /www/server/panel/config/config.json; do
+    [ -f "$f" ] || continue
+    case "${f##*.}" in
+      json)
+        v=$(tr ',{}' '\n\n\n' < "$f" 2>/dev/null | sed -n 's/.*"mysql_root"[ ]*:[ ]*"\([^"]*\)".*/\1/p' | head -n 1)
+        [ -z "$v" ] && v=$(tr ',{}' '\n\n\n' < "$f" 2>/dev/null | sed -n 's/.*"root"[ ]*:[ ]*"\([^"]*\)".*/\1/p' | head -n 1)
+        ;;
+      *)
+        v=$(head -n 1 "$f" 2>/dev/null | tr -d '\r\n')
+        ;;
+    esac
     if [ -n "$v" ]; then printf '%s' "$v"; return 0; fi
   done
+
+  # ③ 面板 sqlite 库（宝塔 8.x/9.x 主要存这里）
+  f=/www/server/panel/data/default.db
+  if [ -f "$f" ]; then
+    if command -v sqlite3 >/dev/null 2>&1; then
+      v=$(sqlite3 "$f" "SELECT value FROM config WHERE id=(SELECT id FROM config WHERE key='mysql_root' LIMIT 1) LIMIT 1;" 2>/dev/null)
+      [ -z "$v" ] && v=$(sqlite3 "$f" "SELECT mysql_root FROM config LIMIT 1;" 2>/dev/null)
+    fi
+    # 没有 sqlite3 就退化为在二进制里捞（sqlite 明文存字符串，通常捞得到）
+    if [ -z "$v" ] && command -v strings >/dev/null 2>&1; then
+      v=$(strings "$f" 2>/dev/null | grep -oE '"mysql_root"[^,}]*' | head -n 1 | sed 's/.*[:"]//g')
+    fi
+    [ -n "$v" ] && { printf '%s' "$v"; return 0; }
+  fi
+
   return 1
+}
+
+# 能不能用某个密码连上 MySQL（返回 0 = 能）
+mysql_try_pass() {
+  local p="$1"
+  [ -x "$MYSQL_BIN" ] || return 1
+  if [ -n "$p" ]; then
+    "$MYSQL_BIN" -h "$DB_HOST" -P "$DB_PORT" -u "$DB_ROOT_USER" -p"$p" \
+      -e 'SELECT 1;' >/dev/null 2>&1
+  else
+    "$MYSQL_BIN" -h "$DB_HOST" -P "$DB_PORT" -u "$DB_ROOT_USER" \
+      -e 'SELECT 1;' >/dev/null 2>&1
+  fi
+}
+
+# 站点目录能不能被 Nginx 读取？
+# 最常见的坑：把项目 clone/上传到了 /root 下面。/root 默认是 700，
+# nginx 以 www 身份跑，连目录都进不去 → 站点直接 403，而且报错不明显。
+check_dir_servable() {
+  local p="$DIR" bad=''
+  # 自底向上检查每一级目录，看「其它人」有没有 x（进入）权限
+  while [ -n "$p" ] && [ "$p" != '/' ]; do
+    if [ -d "$p" ]; then
+      local mode
+      mode=$(stat -c '%a' "$p" 2>/dev/null || stat -f '%Lp' "$p" 2>/dev/null || echo '')
+      case "$mode" in
+        *[0-9][0-9][0-9]) ;;   # 拿到三位权限
+        *) p=$(dirname "$p"); continue ;;
+      esac
+      # 取最后一位（other 的权限），需要含 1（可进入）
+      local other="${mode%${mode#?}}"   # 首位
+      other="${mode##${mode%?}}"        # 末位
+      case "$other" in
+        *1*|*3*|*5*|*7*) ;;
+        *) bad="$p" ;;
+      esac
+    fi
+    p=$(dirname "$p")
+  done
+
+  if [ -n "$bad" ]; then
+    warn "站点目录的上级「${bad}」没有给其它用户进入权限，Nginx(www) 会读不到文件，装完打开会是 403"
+    if dry; then
+      dim "  dry-run：正式安装会在这里中止并给出两种修法"
+    else
+      die "站点目录不可被 Nginx 读取：${bad} 权限太严（例如 /root 默认 700）" \
+"两种修法任选：
+      ① 换个目录放站点（推荐）：
+         bash install.sh --domain ${DOMAIN} --dir /www/wwwroot/wzbp
+         （项目文件可以留在原地，脚本会用这个目录作为站点根）
+      ② 或者放开那一级目录的进入权限：
+         chmod o+x ${bad}"
+    fi
+  else
+    ok '站点目录权限可被 Nginx 读取'
+  fi
 }
 
 # =============================================================================
@@ -769,12 +865,21 @@ step_prepare_dir() {
     ok '关键文件齐全（index.html / overlay.html / data/ / vendor/ / server/）'
   fi
 
+  check_dir_servable
+
   chown_tree "$DIR"
   chmod_tree "$DIR"
   ok "站点目录权限已处理（${RUN_USER}:${RUN_GROUP}，755）"
 }
 
 acquire_sources() {
+  # 一键模式（bash <(curl ...) --domain x）不会带 --repo，这里补上默认仓库，
+  # 否则目录里没有项目文件会直接失败 —— 那条一行命令就废了。
+  if [ -z "$REPO_URL" ] && [ -z "$TARBALL_URL" ] && [ "$IN_PROJECT_DIR" != 1 ]; then
+    REPO_URL="$DEFAULT_REPO"
+    info "一键模式：自动从 ${REPO_URL} 拉取项目代码"
+  fi
+
   if [ -n "$REPO_URL" ]; then
     info "从 git 仓库拉取项目：${REPO_URL} → ${DIR}"
     if dry; then
@@ -898,27 +1003,56 @@ step_database() {
     fi
   fi
 
-  # 管理员密码：参数 > 宝塔配置 > 交互询问
+  # 管理员密码：参数 > .my.cnf/宝塔配置 > 免密直连 > 交互询问
   if [ "$DB_ROOT_PASS_GIVEN" = 0 ]; then
     local found
     found=$(mysql_root_pass_from_panel 2>/dev/null || true)
+
+    # 板上钉钉地验一下这个密码真能用，别拿个错的密码往下跑
+    if [ -n "$found" ] && ! dry && ! mysql_try_pass "$found"; then
+      warn '宝塔配置里读到的 root 密码连不上，改试其它方式'
+      found=''
+    fi
+
     if [ -n "$found" ]; then
       DB_ROOT_PASS="$found"
-      ok '已从宝塔配置里读到 MySQL root 密码'
+      ok '已自动读到 MySQL root 密码（无需手动输入）'
     elif dry; then
       DB_ROOT_PASS='__FROM_PANEL_OR_PROMPT__'
-      dim '  dry-run：正式安装时会先找宝塔保存的 root 密码，找不到就交互询问（或要求 --db-root-pass）'
+      dim '  dry-run：正式安装时会依次尝试：/root/.my.cnf → 宝塔配置 → 免密直连 → 交互询问'
+    elif mysql_try_pass ''; then
+      # 不少宝塔/镜像环境 root 本地是免密（socket 或空密码）
+      DB_ROOT_PASS=''
+      ok 'MySQL root 本地免密，直接用（无需输入密码）'
+    elif [ ! -t 0 ] || [ -n "$WZBP_NO_PROMPT" ]; then
+      die '不知道 MySQL 管理员密码' \
+"两种办法任选：
+      ① 加参数重跑（推荐）：bash install.sh --domain ${DOMAIN} --db-root-pass '你的root密码'
+      ② 先手动建好库和用户，脚本会自动跳过这一步（幂等）：
+         mysql -uroot -p -e \"CREATE DATABASE IF NOT EXISTS ${DB_NAME} DEFAULT CHARACTER SET utf8mb4;\"
+         mysql -uroot -p -e \"CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '自己定个密码';\"
+         mysql -uroot -p -e \"GRANT ALL ON ${DB_NAME}.* TO '${DB_USER}'@'localhost'; FLUSH PRIVILEGES;\"
+      root 密码在宝塔面板 → 数据库 → root 密码 里可以看/改。"
     else
-      if [ ! -t 0 ]; then
-        die '不知道 MySQL 管理员密码（非交互环境）' "加参数 --db-root-pass '<root密码>' 重跑；或在宝塔面板 → 数据库 → root 密码 里查看。"
-      fi
-      printf '%s\n' '请输入 MySQL 管理员密码（宝塔面板 → 数据库 → root 密码；输入不回显）：'
-      printf 'root 密码: '
-      local rp=''
-      read -r -s rp || rp=''
+      # 注意：这里**故意不用 read -s**。
+      # 宝塔的网页终端（xterm.js）对隐藏输入支持不好，表现为「敲了没反应、看着像卡死」，
+      # 明文回显反而能让人看见自己到底输了什么。
       printf '\n'
+      printf '%s\n' '需要 MySQL 的 root 密码（宝塔面板 → 数据库 → root 密码）。'
+      printf '%s\n' '直接粘贴或输入，然后按回车（会明文显示，属于正常现象）。'
+      printf '%s\n' '实在不想输：按 Ctrl+C 退出，改用  bash install.sh --domain '"${DOMAIN}"' --db-root-pass 密码  重跑。'
+      printf '\nroot 密码: '
+      local rp=''
+      read -r rp || rp=''
+      rp=$(printf '%s' "$rp" | tr -d '\r')
       [ -n "$rp" ] || die '没有提供 MySQL 管理员密码' "用 --db-root-pass '<root密码>' 重跑。"
+      if ! mysql_try_pass "$rp"; then
+        die '这个 root 密码连不上 MySQL' \
+"检查：① 宝塔 → 软件商店 → MySQL 是否「运行中」；② 密码是否复制全（前后别带空格）；
+      ③ 端口是不是 ${DB_PORT}（不是的话加 --db-port）；④ 宝塔 → 数据库 → root 密码 里重新确认。"
+      fi
       DB_ROOT_PASS="$rp"
+      ok 'root 密码验证通过'
     fi
   fi
 
