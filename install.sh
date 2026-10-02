@@ -686,23 +686,25 @@ mysql_try_pass() {
 # 最常见的坑：把项目 clone/上传到了 /root 下面。/root 默认是 700，
 # nginx 以 www 身份跑，连目录都进不去 → 站点直接 403，而且报错不明显。
 check_dir_servable() {
-  local p="$DIR" bad=''
+  local p bad='' self
+  self=$(printf '%s' "$DIR" | sed 's:/*$::')
+  p="$self"
   # 自底向上检查每一级目录，看「其它人」有没有 x（进入）权限
   while [ -n "$p" ] && [ "$p" != '/' ]; do
     if [ -d "$p" ]; then
-      local mode
-      mode=$(stat -c '%a' "$p" 2>/dev/null || stat -f '%Lp' "$p" 2>/dev/null || echo '')
-      case "$mode" in
-        *[0-9][0-9][0-9]) ;;   # 拿到三位权限
-        *) p=$(dirname "$p"); continue ;;
-      esac
-      # 取最后一位（other 的权限），需要含 1（可进入）
-      local other="${mode%${mode#?}}"   # 首位
-      other="${mode##${mode%?}}"        # 末位
-      case "$other" in
-        *1*|*3*|*5*|*7*) ;;
-        *) bad="$p" ;;
-      esac
+      # $DIR 本身刚刚被 chmod 755 过，不用再判（而且它归脚本管）
+      if [ "$p" != "$self" ]; then
+        local mode other
+        mode=$(stat -c '%a' "$p" 2>/dev/null || stat -f '%Lp' "$p" 2>/dev/null || echo '')
+        case "$mode" in
+          [0-7][0-7][0-7])
+            other="${mode##${mode%?}}"        # 末位 = other 的权限
+            case "$other" in
+              0|2|4|6) bad="$p" ;;            # 没有 x → nginx 进不去
+            esac
+            ;;
+        esac
+      fi
     fi
     p=$(dirname "$p")
   done
@@ -865,11 +867,14 @@ step_prepare_dir() {
     ok '关键文件齐全（index.html / overlay.html / data/ / vendor/ / server/）'
   fi
 
-  check_dir_servable
-
   chown_tree "$DIR"
   chmod_tree "$DIR"
   ok "站点目录权限已处理（${RUN_USER}:${RUN_GROUP}，755）"
+
+  # 注意顺序：必须在 chmod_tree 之后检查。
+  # 脚本自己能修 $DIR 本身的权限，修不了的是它的上级目录（典型是 /root 的 700），
+  # 所以这里真正要拦的是「上级目录进不去」这种情况。
+  check_dir_servable
 }
 
 acquire_sources() {
