@@ -1124,9 +1124,19 @@ async function hAction(req, res, url, params) {
           空 ban 跳过英雄校验 —— 它本来就没有英雄 */
     if (!isEmptyBan) {
       if (!heroes.has(heroId)) fail(404, 'ERR_HERO_UNKNOWN', '英雄不存在（id ' + heroId + '）');
-      /* 3) 本局不能被 ban/pick 过两次 */
-      const taken = actions.some(function (a) { return Number(a.hero_id) === heroId; });
-      if (taken) fail(409, 'ERR_HERO_TAKEN', (heroes.nameOf(heroId) || ('英雄 ' + heroId)) + ' 已经被 ban/pick 过了');
+
+      /* 3) 本局不能被用两次。
+            随机征召允许双方选到同一个英雄（同队内仍不能重复），
+            所以那边只查「本侧」有没有用过。 */
+      const dupMode = draft.allowsDuplicate(series.mode);
+      const taken = actions.some(function (a) {
+        if (Number(a.hero_id) !== heroId) return false;
+        return dupMode ? a.side === side : true;
+      });
+      if (taken) {
+        fail(409, 'ERR_HERO_TAKEN', (heroes.nameOf(heroId) || ('英雄 ' + heroId)) +
+          (dupMode ? ' 已被' + sideName(side) + '选过' : ' 已经被 ban/pick 过了'));
+      }
 
       /* 3b) 全局 BP（kpl）：本方在本系列赛选过的英雄，本方后续小局不能再选。
              对方选过的不影响；禁用不进池（池子只由 action='pick' 组成）。 */

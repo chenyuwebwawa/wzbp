@@ -755,23 +755,30 @@ async function runSuite() {
   }
 
   const f0 = orderFacts(rOrder);
-  checkEq('随机 order 共 16 手', f0.total, 16);
-  checkEq('ban 6 个', f0.banTotal, 6);
+  checkEq('随机 order 共 10 手（没有 ban）', f0.total, 10);
+  checkEq('ban 0 个（随机征召没有禁用阶段）', f0.banTotal, 0);
   checkEq('pick 10 个', f0.pickTotal, 10);
-  checkEq('蓝 3 ban / 红 3 ban', f0.banBlue + '/' + f0.banRed, '3/3');
   checkEq('蓝 5 pick / 红 5 pick', f0.pickBlue + '/' + f0.pickRed, '5/5');
-  checkEq('ban 段在前（前 6 项都是 ban）', rOrder.slice(0, 6).every((s) => s.a === 'ban'), true);
   checkEq('pick 段仍由蓝方先手', f0.firstPickSide, 'blue');
-  check('同队不连续 3 手以上（ban 段）', f0.banMaxRun <= 2, 'ban 段最长连击=' + f0.banMaxRun);
   check('同队不连续 3 手以上（pick 段）', f0.pickMaxRun <= 2, 'pick 段最长连击=' + f0.pickMaxRun);
 
   const reshuffle = await api('POST', '/api/rooms/' + rndCode + '/shuffle', {}, P1);
   checkEq('重洗 HTTP 200', reshuffle.status, 200);
   const f1 = orderFacts(reshuffle.json.order);
   check('重洗后仍满足全部约束',
-    f1.total === 16 && f1.banBlue === 3 && f1.banRed === 3 && f1.pickBlue === 5 && f1.pickRed === 5 &&
-    f1.firstPickSide === 'blue' && f1.banMaxRun <= 2 && f1.pickMaxRun <= 2,
+    f1.total === 10 && f1.banTotal === 0 && f1.pickBlue === 5 && f1.pickRed === 5 &&
+    f1.firstPickSide === 'blue' && f1.pickMaxRun <= 2,
     JSON.stringify(f1));
+
+  /* 洗牌 30 次都必须「10 手、无 ban、各 5」，防止哪天底稿被改回去 */
+  let shuffleBad = 0;
+  for (let i = 0; i < 30; i++) {
+    const s = await api('POST', '/api/rooms/' + rndCode + '/shuffle', {}, P1);
+    if (s.status !== 200) { shuffleBad++; continue; }
+    const fj = orderFacts(s.json.order);
+    if (fj.total !== 10 || fj.banTotal !== 0 || fj.pickBlue !== 5 || fj.pickRed !== 5) shuffleBad++;
+  }
+  checkEq('连洗 30 次都是「10 手 / 无 ban / 各 5」', shuffleBad, 0);
 
   const rndFirst = reshuffle.json.order[0];
   await api('POST', '/api/rooms/' + rndCode + '/action',
@@ -781,6 +788,108 @@ async function runSuite() {
   checkEq('落子后重洗 → ERR_ALREADY_STARTED', shuffleLate.json && shuffleLate.json.code, 'ERR_ALREADY_STARTED');
   const shuffleRanked = await api('POST', '/api/rooms/' + bo1Code + '/shuffle', {}, P1);
   checkEq('非 random 房重洗 → 409', shuffleRanked.status, 409);
+
+  /* ---------- 16b. 随机征召：双方可以选同一个英雄 ---------- */
+  group('16b. 随机征召：双方可以选同一个英雄（同队内不重复）');
+  {
+    const R1 = 'rnd-a-' + Date.now();
+    const R2 = 'rnd-b-' + Date.now();
+    const rr = await api('POST', '/api/rooms', {
+      name: '随机重复自检', mode: 'random', seriesCount: 1, turnSeconds: 60,
+      adminUser: 'rndcoach', adminPass: 'secret123', playerKey: R1, nickname: '甲'
+    });
+    checkEq('随机重复 建房 HTTP 200', rr.status, 200);
+    const rc = rr.json.room.code;
+    const rt = rr.json.adminToken;
+    await api('POST', '/api/rooms/' + rc + '/join', { nickname: '乙', team: 'red', playerKey: R2 });
+    await api('POST', '/api/rooms/' + rc + '/launch', { adminToken: rt });
+
+    const rs = await api('GET', '/api/rooms/' + rc + '/state?playerKey=' + R1);
+    checkEq('随机征召蓝图 10 手', rs.json.series.order.length, 10);
+    checkEq('随机征召蓝图没有 ban',
+      rs.json.series.order.filter((s) => s.a === 'ban').length, 0);
+    checkEq('第一步就是选人', rs.json.game.nextAction && rs.json.game.nextAction.action, 'pick');
+
+    /* 故意让双方每一步都挑「对方用过的英雄」，制造最大重叠 */
+    const cand = (heroIds && heroIds.length >= 12 ? heroIds.slice(0, 12)
+      : Array.from({ length: 12 }, (_, i) => 105 + i));
+    const usedRows = { blue: [], red: [] };
+    let stepFail = '';
+    for (let i = 0; i < 10; i++) {
+      const st = await api('GET', '/api/rooms/' + rc + '/state?playerKey=' + R1);
+      const na = st.json.game.nextAction;
+      if (!na) break;
+      const other = na.side === 'blue' ? 'red' : 'blue';
+      let hero = usedRows[other].find((h) => usedRows[na.side].indexOf(h) === -1);
+      if (!hero) hero = cand.find((h) => usedRows[na.side].indexOf(h) === -1);
+      const r = await api('POST', '/api/rooms/' + rc + '/action',
+        { playerKey: na.side === 'blue' ? R1 : R2, side: na.side, action: 'pick', heroId: hero });
+      if (!r.json || !r.json.ok) { stepFail = '第' + (i + 1) + '手:' + JSON.stringify(r.json); break; }
+      usedRows[na.side].push(hero);
+    }
+    checkEq('10 手全部按蓝图落成', stepFail, '');
+    const rend = await api('GET', '/api/rooms/' + rc + '/state?playerKey=' + R1);
+    const bg = rend.json.game;
+    check('整局 done=true 且 10 手', bg.done === true && rend.json.actions.length === 10,
+      bg.done + '/' + rend.json.actions.length);
+    checkEq('双方阵容各 5 个', bg.picks.blue.length + '/' + bg.picks.red.length, '5/5');
+    const overlap = bg.picks.blue.filter((h) => bg.picks.red.indexOf(h) !== -1);
+    check('双方确实选到了相同英雄（落库也保留）', overlap.length >= 1,
+      '重叠 ' + overlap.length + ' 个：' + JSON.stringify(overlap));
+    checkEq('随机征召全程没有 ban', bg.bans.blue.length + bg.bans.red.length, 0);
+
+    /* 同队内仍然不能重复 */
+    const R3 = 'rnd-c-' + Date.now();
+    const R4 = 'rnd-d-' + Date.now();
+    const rr2 = await api('POST', '/api/rooms', {
+      name: '随机同队重复', mode: 'random', seriesCount: 1, turnSeconds: 60,
+      adminUser: 'rndcoach2', adminPass: 'secret123', playerKey: R3, nickname: '甲'
+    });
+    const rc2 = rr2.json.room.code;
+    const rt2 = rr2.json.adminToken;
+    await api('POST', '/api/rooms/' + rc2 + '/join', { nickname: '乙', team: 'red', playerKey: R4 });
+    await api('POST', '/api/rooms/' + rc2 + '/launch', { adminToken: rt2 });
+
+    const o2 = (await api('GET', '/api/rooms/' + rc2 + '/state?playerKey=' + R3)).json.series.order;
+    let bc = 0; let secondBlue = -1;
+    for (let i = 0; i < o2.length; i++) { if (o2[i].s === 'blue') { bc += 1; if (bc === 2) secondBlue = i; } }
+    check('蓝图里蓝方有第二次出手', secondBlue > 0, String(secondBlue));
+
+    let dupRes = null;
+    for (let i = 0; i < 10; i++) {
+      const st = await api('GET', '/api/rooms/' + rc2 + '/state?playerKey=' + R3);
+      const na = st.json.game.nextAction;
+      if (!na) break;
+      const hero = (i === 0 || i === secondBlue) ? cand[0] : cand[i + 1];
+      const r = await api('POST', '/api/rooms/' + rc2 + '/action',
+        { playerKey: na.side === 'blue' ? R3 : R4, side: na.side, action: 'pick', heroId: hero });
+      if (i === secondBlue) { dupRes = r; break; }
+      if (!r.json || !r.json.ok) break;
+    }
+    checkEq('同队第二次选同一个英雄 → 409', dupRes && dupRes.status, 409);
+    checkEq('同队重复 → ERR_HERO_TAKEN', dupRes && dupRes.json && dupRes.json.code, 'ERR_HERO_TAKEN');
+    check('拒绝原因点明是「同一方选过」', /选过/.test((dupRes && dupRes.json && dupRes.json.error) || ''),
+      (dupRes && dupRes.json && dupRes.json.error) || '');
+
+    /* 其它赛制不受影响 */
+    const R5 = 'rnd-e-' + Date.now();
+    const R6 = 'rnd-f-' + Date.now();
+    const rr3 = await api('POST', '/api/rooms', {
+      name: '排位互斥回归', mode: 'ranked', seriesCount: 1, turnSeconds: 60,
+      adminUser: 'rndcoach3', adminPass: 'secret123', playerKey: R5, nickname: '甲'
+    });
+    const rc3 = rr3.json.room.code;
+    const rt3 = rr3.json.adminToken;
+    await api('POST', '/api/rooms/' + rc3 + '/join', { nickname: '乙', team: 'red', playerKey: R6 });
+    await api('POST', '/api/rooms/' + rc3 + '/launch', { adminToken: rt3 });
+    const rb1 = await api('POST', '/api/rooms/' + rc3 + '/action',
+      { playerKey: R5, side: 'blue', action: 'ban', heroId: cand[0] });
+    checkEq('排位征召：蓝方 ban', rb1.status, 200);
+    const rb2 = await api('POST', '/api/rooms/' + rc3 + '/action',
+      { playerKey: R6, side: 'red', action: 'ban', heroId: cand[0] });
+    checkEq('排位征召仍然全局互斥 → 409', rb2.status, 409);
+    checkEq('排位征召互斥 → ERR_HERO_TAKEN', rb2.json && rb2.json.code, 'ERR_HERO_TAKEN');
+  }
 
   /* ---------- 17. 巅峰赛 'both' 步语义 ---------- */
   group('17. 巅峰赛 both 步（一步吃 6 手）');

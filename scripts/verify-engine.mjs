@@ -323,6 +323,85 @@ section('空 ban：禁用阶段可以不下手');
   eq(D.state().bans.red, [105], '分享码还原出正常 ban');
 }
 
+section('随机征召：没有 ban，双方可以选同一个英雄（同队内不重复）');
+{
+  D.init('random');
+  const s0 = D.state();
+  eq(s0.totalSteps, 10, '随机征召共 10 手（纯选人）');
+  eq(s0.cap.blue.ban, 0, '蓝方没有 ban 位');
+  eq(s0.cap.red.ban, 0, '红方没有 ban 位');
+  eq(s0.cap.blue.pick, 5, '蓝方 5 个 pick 位');
+  eq(s0.cap.red.pick, 5, '红方 5 个 pick 位');
+  eq(D.allowsDuplicate(), true, '随机征召允许双方重复选同一英雄');
+  eq(s0.pool.length, N, '开局可选池是全部英雄（沙箱里是 ' + N + ' 个）');
+
+  /* 没有 ban 阶段：第一步就是选人 */
+  eq(s0.stepInfo.action, 'pick', '第一步就是选人（没有禁用阶段）');
+  eq(D.canEmptyBan(s0.stepInfo.side), false, '随机征召不能空 ban（没有 ban 阶段）');
+  const noBan = D.apply(s0.stepInfo.side, 'ban', 105);
+  eq(noBan.ok, false, '随机征召里 ban 会被拒（赛制表里没有 ban 步骤）');
+
+  /* 同一英雄两边都能选 */
+  D.init('random');
+  const first = D.state().stepInfo.side;
+  const other = first === 'blue' ? 'red' : 'blue';
+  const r1 = D.apply(first, 'pick', 105);
+  eq(r1.ok, true, '第一方选 105 成功');
+  ok(D.state().pool.indexOf(105) !== -1, '换成对方出手时，105 仍在可选池里');
+  const r2 = D.apply(other, 'pick', 105);
+  eq(r2.ok, true, '对方也选了同一个 105（允许重复）');
+  eq(D.state().picks[first], [105], '第一方阵容里有 105');
+  eq(D.state().picks[other], [105], '对方阵容里也有 105');
+
+  /* 手序是 蓝红红蓝蓝红…（不是交替）：补掉对方这一手才会轮回第一方 */
+  if (D.state().stepInfo.side !== first) {
+    const sm = D.state();
+    D.apply(sm.stepInfo.side, 'pick', heroId(10));
+  }
+  eq(D.state().stepInfo.side, first, '又轮回到第一方');
+  ok(D.state().pool.indexOf(105) === -1, '第一方的可选池里已经没有 105（对方用过的仍不算）');
+  const r3 = D.apply(first, 'pick', 105);
+  eq(r3.ok, false, '同一队不能重复选同一个英雄');
+  ok(/选过/.test(r3.reason || ''), '拒绝原因说得清楚', r3.reason || '');
+
+  eq(D.takenBySide(first, 105), true, '本方选过的英雄，本方被标记为已用');
+  eq(D.takenBySide(other, 105), true, '对方选过的英雄，对方也标记为已用');
+
+  /* 打满一局 */
+  D.init('random');
+  let guard = 0;
+  while (!D.state().done && guard++ < 30) {
+    const s = D.state();
+    const id = s.pool[0];                 // 双方都优先选池子第一个，制造最大重叠
+    const r = D.apply(s.stepInfo.side, s.stepInfo.action, id);
+    if (!r.ok) break;
+  }
+  const end = D.state();
+  eq(end.done, true, '随机征召能正常走完 10 手');
+  eq(end.picks.blue.length, 5, '蓝方 5 个');
+  eq(end.picks.red.length, 5, '红方 5 个');
+  eq(end.bans.blue.length + end.bans.red.length, 0, '全程没有 ban');
+
+  /* 导出 / 导入往返：重复英雄能原样还原 */
+  const dump = D.exportData();
+  D.init('random');
+  const imp = D.importData(dump);
+  eq(imp.ok, true, '带重复英雄的随机征召数据能导入');
+  eq(D.state().picks.blue.length, 5, '导入后蓝方仍是 5 个');
+  eq(D.state().picks.red.length, 5, '导入后红方仍是 5 个');
+
+  /* 其它赛制不受影响：仍然全局互斥 */
+  D.init('ranked');
+  D.apply('blue', 'ban', 105);
+  const cross = D.apply('red', 'ban', 105);
+  eq(cross.ok, false, '排位征召仍然全局互斥（对方 ban 过的本方不能 ban）');
+  eq(D.allowsDuplicate(), false, '排位征召不允许重复');
+
+  D.init('kpl');
+  eq(D.allowsDuplicate(), false, '全局 BP 不允许重复');
+  eq(D.state().cap.blue.ban, 5, '全局 BP 仍然是每队 5 个 ban 位');
+}
+
 section('赛制顺序与服务端镜像逐项一致（防止两边漂移）');
 {
   /* 服务端在 server/draft.js 里镜像了一份顺序，两边不一致会导致整局都对不上。

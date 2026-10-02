@@ -79,15 +79,34 @@ const PEAK_STEPS = [
   { s: 'red', a: 'pick', p: '第二轮选择', t: '红方五楼' }
 ];
 
-/* 契约 §6：random 取「ranked 的 6 ban + 10 pick 配比」作为洗牌底稿 */
-const RANDOM_BASE = RANKED_STEPS;
+/* 契约 §6：random 的洗牌底稿 —— **没有 ban**，只有 10 个选人位（双方各 5）。
+   随机征召允许双方选到同一个英雄（allowDuplicate），所以也不需要 ban 来「占掉」英雄。 */
+const RANDOM_BASE = [
+  { s: 'blue', a: 'pick', p: '第一轮选择', t: '' },
+  { s: 'red', a: 'pick', p: '第一轮选择', t: '' },
+  { s: 'blue', a: 'pick', p: '第一轮选择', t: '' },
+  { s: 'red', a: 'pick', p: '第一轮选择', t: '' },
+  { s: 'blue', a: 'pick', p: '第一轮选择', t: '' },
+  { s: 'red', a: 'pick', p: '第二轮选择', t: '' },
+  { s: 'blue', a: 'pick', p: '第二轮选择', t: '' },
+  { s: 'red', a: 'pick', p: '第二轮选择', t: '' },
+  { s: 'blue', a: 'pick', p: '第二轮选择', t: '' },
+  { s: 'red', a: 'pick', p: '第二轮选择', t: '' }
+];
 
 const MODES = {
   ranked: { id: 'ranked', name: '排位征召', steps: RANKED_STEPS },
   kpl: { id: 'kpl', name: '全局 BP', global: true, steps: KPL_STEPS },
   peak: { id: 'peak', name: '巅峰赛', steps: PEAK_STEPS },
-  random: { id: 'random', name: '随机征召', steps: RANDOM_BASE }
+  /* 允许双方选到同一个英雄（同队内不重复） */
+  random: { id: 'random', name: '随机征召', allowDuplicate: true, steps: RANDOM_BASE }
 };
+
+/* 这一赛制是否允许「双方选到同一个英雄」（随机征召） */
+function allowsDuplicate(mode) {
+  const m = typeof mode === 'string' ? MODES[mode] : mode;
+  return !!(m && m.allowDuplicate);
+}
 
 const MODE_IDS = Object.keys(MODES);
 
@@ -238,7 +257,9 @@ function arrange(sides, limit, first, rnd) {
 
 /**
  * 洗牌：契约 §6。
- * @param {Array} base 底稿蓝图（默认按 ranked 的 6 ban + 10 pick 配比）
+ * 随机征召**没有禁用阶段**（v5 改）：底稿只有 10 个选人位，洗牌只洗选人顺序。
+ * 保留 ban 分支是为了兼容 setOrder() 注入的自定义蓝图。
+ * @param {Array} base 底稿蓝图（默认 10 个选人位、双方各 5）
  * @param {Function} [rnd] 随机源（自检注入固定序列用）
  * @returns {Array} 新的蓝图数组（ban 段在前、pick 段在后）
  */
@@ -293,6 +314,7 @@ module.exports = {
   shuffleOrder,
   isMode,
   isGlobal,
+  allowsDuplicate,
   capacities,
   totalActions,
   actionsOfStep,

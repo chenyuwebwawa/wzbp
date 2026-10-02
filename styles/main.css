@@ -863,3 +863,8 @@ body.role-display .stage { padding: 12px; height: 100vh; }
 .act-empty-ban { margin-top: 2px; font-size: 12.5px; }
 .act-empty-ban:not([disabled]) { border-color: rgba(126,144,173,.6); color: #cfdcf0; }
 .act-empty-ban:not([disabled]):hover { border-color: var(--gold); color: var(--gold); }
+
+/* 随机征召：对方用过的英雄仍可选 —— 只做提示，不标灰 */
+.hero-card.is-other-side { opacity: .82; }
+.hero-card.is-other-side .hc-flag .tag { background: rgba(120, 140, 175, .85); }
+.hero-card.is-other-side:hover { opacity: 1; }

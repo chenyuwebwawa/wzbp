@@ -114,16 +114,14 @@ window.WZ = window.WZ || {};
       id: 'random',
       name: '随机征召',
       short: '随机',
-      desc: '顺序随机：ban 位与 pick 位的先后手每局洗牌（双方 ban/pick 数量不变、pick 仍由蓝方先手），英雄仍由人手动选。联网开房间时由服务端洗牌并全房间共享；也支持用 setOrder() 注入自定义顺序。',
-      /* 兜底顺序：与排位征召一致。真正生效的是 setOrder() 注入的洗牌结果，
-         这里是「还没拿到蓝图」时的默认值，保证引擎任何时刻都可用。 */
+      desc: '没有禁用阶段，直接选人：双方各 5 手、共 10 手，顺序每局随机洗牌。' +
+            '双方**可以选到同一个英雄**（同队内不重复）—— 这是随机征召和征召模式最大的区别。' +
+            '联网开房间时由服务端洗牌并全房间共享；也支持用 setOrder() 注入自定义顺序。',
+      /* 允许双方重复选到同一个英雄（同队内仍然不能重复） */
+      allowDuplicate: true,
+      /* 兜底顺序：10 个选人位、双方各 5。
+         真正生效的是 setOrder() 注入的洗牌结果，这里是「还没拿到蓝图」时的默认值。 */
       steps: [
-        { s: 'blue', a: 'ban', p: '禁用阶段' },
-        { s: 'red', a: 'ban', p: '禁用阶段' },
-        { s: 'red', a: 'ban', p: '禁用阶段' },
-        { s: 'blue', a: 'ban', p: '禁用阶段' },
-        { s: 'blue', a: 'ban', p: '禁用阶段' },
-        { s: 'red', a: 'ban', p: '禁用阶段' },
         { s: 'blue', a: 'pick', p: '第一轮选择' },
         { s: 'red', a: 'pick', p: '第一轮选择' },
         { s: 'red', a: 'pick', p: '第一轮选择' },
@@ -137,6 +135,11 @@ window.WZ = window.WZ || {};
       ]
     }
   ];
+
+  /* 这一赛制是否允许「双方选到同一个英雄」 */
+  function allowDuplicate(mode) {
+    return !!(mode && mode.allowDuplicate);
+  }
 
   /* 随机征召用的「自定义顺序」：
      联网模式下由服务端下发蓝图，这里存一份覆盖 MODES 里的 steps。
@@ -271,14 +274,46 @@ window.WZ = window.WZ || {};
     return false;
   }
 
+  /* 只看「某一侧」有没有用过某个英雄。
+     随机征召允许双方选同一个英雄，所以那边不能用全局的 taken()，
+     必须按侧判断 —— 否则对方选过的英雄会把自己的池子也锁掉。 */
+  function takenBySide(side, heroId) {
+    var id = String(heroId);
+    if (!st.bans[side] || !st.picks[side]) return false;
+    var j;
+    for (j = 0; j < st.bans[side].length; j++) {
+      if (String(st.bans[side][j]) === id) return true;
+    }
+    for (j = 0; j < st.picks[side].length; j++) {
+      if (String(st.picks[side][j]) === id) return true;
+    }
+    return false;
+  }
+
+  /* 当前轮到哪一侧出手（'both' 步骤或已结束时返回 null） */
+  function currentSide() {
+    if (!st || st.done) return null;
+    var cur = activeSteps(modeById(st.mode))[st.step];
+    if (!cur || cur.s === 'both') return null;
+    return cur.s;
+  }
+
+  /* 对外：某侧能不能用某个英雄（供 UI 标灰判断）。
+     注意这里只是「函数定义」，api 的挂载统一放在 api 声明之后。 */
+  function takenBySidePublic(side, heroId) { return takenBySide(side, heroId); }
+
   function recompute() {
     var all = WZ.HEROES || [];
     var out = [];
+    var mode = modeById(st.mode);
+    /* 允许重复的赛制：池子只排除「当前这一侧」已经用过的英雄 ——
+       对方用过的仍然可选。轮次切换时池子跟着变，这是有意的。 */
+    var forSide = allowDuplicate(mode) ? currentSide() : null;
     for (var i = 0; i < all.length; i++) {
-      if (!taken(all[i].id)) out.push(all[i].id);
+      if (forSide ? !takenBySide(forSide, all[i].id) : !taken(all[i].id)) out.push(all[i].id);
     }
     st.pool = out;
-    st.done = st.step >= activeSteps(modeById(st.mode)).length;
+    st.done = st.step >= activeSteps(mode).length;
     return st;
   }
 
@@ -421,6 +456,13 @@ window.WZ = window.WZ || {};
   api.EMPTY_BAN = EMPTY_BAN;
   api.isEmptyBan = function (id) { return Number(id) === EMPTY_BAN; };
 
+  /* 允许双方重复选同一英雄的赛制（随机征召）相关查询 */
+  api.takenBySide = takenBySidePublic;
+  api.allowsDuplicate = function () {
+    return allowDuplicate(modeById(st ? st.mode : MODES[0].id));
+  };
+  api.currentSide = currentSide;
+
   /* 某个英雄 id 算不算「没给」——空 ban 与非法 id 都归到这里 */
   function noHero(id) {
     return id === null || id === undefined || id === '' || Number(id) === 0 || isNaN(Number(id));
@@ -470,9 +512,16 @@ window.WZ = window.WZ || {};
     if (!emptyBan) {
       if (noHero(heroId)) return { ok: false, reason: '请选择一个英雄' };
       if (!WZ.util.heroById(heroId)) return { ok: false, reason: '英雄不存在' };
-      if (taken(heroId)) {
+      /* 允许双方重复的赛制（随机征召）只查同侧；其它赛制全局互斥 */
+      var dup = allowDuplicate(modeById(st.mode));
+      if (dup ? takenBySide(side, heroId) : taken(heroId)) {
         var h = WZ.util.heroById(heroId);
-        return { ok: false, reason: (h ? h.name : '该英雄') + ' 已被 ban/pick' };
+        return {
+          ok: false,
+          reason: (h ? h.name : '该英雄') + (dup
+            ? ' 已被' + (side === 'blue' ? '蓝方' : '红方') + '选过'
+            : ' 已被 ban/pick')
+        };
       }
     }
     /* 全局 BP：本方在之前小局选过的英雄，本方不能再选（对方不受影响）；

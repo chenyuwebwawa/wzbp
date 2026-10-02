@@ -362,6 +362,59 @@ window.__SMOKE__ = (function () {
       ok(!!eb2 && /选择阶段|不能空/.test(eb2.title || ''), '按钮 title 说明了原因', eb2 ? eb2.title : '');
     }
 
+    /* ---------- 10c2. 随机征召：双方可以选同一个英雄 ---------- */
+    {
+      D.init('random');
+      await wait(280);
+      eq(D.state().totalSteps, 10, '随机征召 10 手（没有 ban）');
+      eq(D.state().stepInfo.action, 'pick', '第一步就是选人');
+      var ebRnd = document.getElementById('actEmptyBan');
+      ok(!!ebRnd && ebRnd.disabled === true, '随机征召没有 ban 阶段，空 BAN 按钮不可用');
+
+      var firstSide = D.state().stepInfo.side;
+      var heroA = WZ.HEROES[0].id;
+      D.apply(firstSide, 'pick', heroA);
+      await wait(280);
+      WZ.ui.syncTakenFlags();
+      await wait(140);
+
+      var cardA = document.querySelector('.hero-card[data-id="' + heroA + '"]');
+      ok(!!cardA, '找得到刚被选走的英雄卡片');
+      if (cardA) {
+        ok(!cardA.classList.contains('is-taken'), '对方用过的英雄卡片不标灰（仍然可选）');
+        ok(!cardA.classList.contains('is-pick'), '不标成「已选」占用');
+        ok(cardA.classList.contains('is-other-side'), '标记为「对方已选」提示');
+        var flagA = cardA.querySelector('.hc-flag .tag');
+        ok(!!flagA && /对方已选/.test(flagA.textContent), '角标文案是「对方已选」',
+          flagA ? flagA.textContent : '');
+      }
+
+      /* 轮到对方，对方也能选同一个英雄 */
+      var secondSide = D.state().stepInfo.side;
+      eq(secondSide !== firstSide, true, '轮到对方出手');
+      var rOther = D.apply(secondSide, 'pick', heroA);
+      eq(rOther.ok, true, '对方也能选同一个英雄（允许重复）');
+      eq(D.state().picks[firstSide], [heroA], '第一方阵容里有它');
+      eq(D.state().picks[secondSide], [heroA], '对方阵容里也有它');
+
+      /* 换回排位征召：互斥必须恢复 */
+      D.init('ranked');
+      await wait(240);
+      eq(D.allowsDuplicate(), false, '排位征召不允许重复');
+      var heroB = WZ.HEROES[1].id;
+      D.apply('blue', 'ban', heroB);
+      await wait(240);
+      WZ.ui.syncTakenFlags();
+      await wait(140);
+      var cardB = document.querySelector('.hero-card[data-id="' + heroB + '"]');
+      ok(!!cardB, '找得到被 ban 的英雄卡片');
+      if (cardB) {
+        ok(cardB.classList.contains('is-taken'), '排位征召：被 ban 的卡片标灰');
+        ok(cardB.classList.contains('is-ban'), '排位征召：角标是 BAN');
+        ok(!cardB.classList.contains('is-other-side'), '排位征召没有「对方已选」这种放行状态');
+      }
+    }
+
     /* ---------- 10d. 战队头像 ---------- */
     {
       ok(typeof WZ.board.setTeams === 'function', 'board 暴露了 setTeams（名字 + 头像）');

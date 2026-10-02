@@ -138,22 +138,43 @@ window.WZ = window.WZ || {};
     if (WZ.app && WZ.app.onGridChanged) WZ.app.onGridChanged(filtered.length, allHeroes.length);
   }
 
+  /* 某个英雄现在「能不能用」。返回 null 表示可用。
+     随机征召允许双方重复：对方用过的英雄仍然可选，所以只有
+     「当前这一侧已经用过」才是真占用；对方用过的只做提示（otherSide:true），不挡。 */
   function takenInfo(id) {
     var st = WZ.draft.state();
     var sides = ['blue', 'red'], i, j;
+    var found = [];
     for (i = 0; i < sides.length; i++) {
       for (j = 0; j < st.bans[sides[i]].length; j++) {
         if (String(st.bans[sides[i]][j]) === String(id)) {
-          return { kind: 'ban', side: sides[i], index: j };
+          found.push({ kind: 'ban', side: sides[i], index: j });
         }
       }
       for (j = 0; j < st.picks[sides[i]].length; j++) {
         if (String(st.picks[sides[i]][j]) === String(id)) {
-          return { kind: 'pick', side: sides[i], index: j };
+          found.push({ kind: 'pick', side: sides[i], index: j });
         }
       }
     }
-    return null;
+    if (!found.length) return null;
+
+    var dup = WZ.draft.allowsDuplicate && WZ.draft.allowsDuplicate();
+    if (!dup) return found[0];
+
+    /* 允许重复：先看「当前这一侧」有没有用过 */
+    var mine = WZ.draft.currentSide ? WZ.draft.currentSide() : null;
+    for (i = 0; i < found.length; i++) {
+      if (found[i].side === mine) return found[i];
+    }
+    /* 只有对方用过 —— 仍然能选，标成 otherSide 只做提示 */
+    var o = found[0];
+    return { kind: o.kind, side: o.side, index: o.index, otherSide: true };
+  }
+
+  /* 这个占用会不会真的挡住操作 */
+  function isBlockedByTaken(info) {
+    return !!info && !info.otherSide;
   }
 
   function renderGrid() {
@@ -192,9 +213,15 @@ window.WZ = window.WZ || {};
 
       var taken = takenInfo(hero.id);
       if (taken) {
-        card.classList.add('is-taken', taken.kind === 'ban' ? 'is-ban' : 'is-pick');
+        /* 随机征召里对方用过的英雄仍然能选：标成「对方已选」提示，不标灰不挡点 */
+        var dupOther = !!taken.otherSide;
+        card.classList.toggle('is-taken', !dupOther);
+        card.classList.toggle('is-pick', !dupOther && taken.kind === 'pick');
+        card.classList.toggle('is-ban', !dupOther && taken.kind === 'ban');
+        card.classList.toggle('is-other-side', dupOther);
         var flag = util.el('div', 'hc-flag ' + taken.side);
-        flag.appendChild(util.el('span', 'tag', taken.kind === 'ban' ? 'BAN' : 'PICK'));
+        flag.appendChild(util.el('span', 'tag',
+          dupOther ? '对方已选' : (taken.kind === 'ban' ? 'BAN' : 'PICK')));
         card.appendChild(flag);
       }
 
@@ -242,11 +269,17 @@ window.WZ = window.WZ || {};
       var taken = takenInfo(id);
       var old = card.querySelector('.hc-flag');
       if (old) old.remove();
-      card.classList.remove('is-taken', 'is-ban', 'is-pick');
+      card.classList.remove('is-taken', 'is-ban', 'is-pick', 'is-other-side');
       if (taken) {
-        card.classList.add('is-taken', taken.kind === 'ban' ? 'is-ban' : 'is-pick');
+        /* 随机征召：对方用过的英雄仍可选，只做提示不标灰 */
+        var dupOther = !!taken.otherSide;
+        card.classList.toggle('is-other-side', dupOther);
+        if (!dupOther) {
+          card.classList.add('is-taken', taken.kind === 'ban' ? 'is-ban' : 'is-pick');
+        }
         var flag = util.el('div', 'hc-flag ' + taken.side);
-        flag.appendChild(util.el('span', 'tag', taken.kind === 'ban' ? 'BAN' : 'PICK'));
+        flag.appendChild(util.el('span', 'tag',
+          dupOther ? '对方已选' : (taken.kind === 'ban' ? 'BAN' : 'PICK')));
         card.appendChild(flag);
       }
       card.classList.toggle('selected', id === selectedId);
@@ -488,12 +521,14 @@ window.WZ = window.WZ || {};
     if (!btns.length) return;
     var hero = util.heroById(selectedId);
     var taken = hero ? takenInfo(hero.id) : null;
+    /* 随机征召里对方用过的英雄仍然能选，所以只有真占用（同侧）才禁按钮 */
+    var takenBlocks = isBlockedByTaken(taken);
     var st = WZ.draft.state();
     var globalOn = !!(st && st.global);
     var globalUsed = (st && st.globalUsed) || { blue: [], red: [] };
 
     btns.forEach(function (b) {
-      var can = !!hero && !taken && WZ.draft.canAct(b.dataset.side, b.dataset.action);
+      var can = !!hero && !takenBlocks && WZ.draft.canAct(b.dataset.side, b.dataset.action);
       /* v3：管理员还没点「开始 BP」时，所有操作都锁住 */
       if (lock.on) can = false;
       /* 全局 BP：本方之前小局选过的英雄，本方不能再选；禁用不受限制 */
@@ -509,13 +544,15 @@ window.WZ = window.WZ || {};
       b.title = blocked
         ? ((b.dataset.side === 'blue' ? '蓝方' : '红方') + '在之前的小局已选用该英雄（全局 BP）')
         : '';
-      if (taken && taken.side === b.dataset.side && taken.kind === b.dataset.action) {
+      if (taken && !taken.otherSide && taken.side === b.dataset.side && taken.kind === b.dataset.action) {
         b.textContent = taken.kind === 'ban' ? '已禁用' : '已选择';
       } else if (blocked) {
         b.textContent = (b.dataset.side === 'blue' ? '蓝方' : '红方') + '已用过';
       } else {
         b.textContent = (b.dataset.side === 'blue' ? '蓝方' : '红方') +
-          (b.dataset.action === 'ban' ? '禁用' : '选择');
+          (b.dataset.action === 'ban' ? '禁用' : '选择') +
+          /* 随机征召：对方用过也不挡，但按钮上说明一下 */
+          (taken && taken.otherSide && taken.side === b.dataset.side ? '（对方已选）' : '');
       }
     });
   }
