@@ -47,6 +47,10 @@ DOMAIN=''
 PORT='8787'
 DIR=''
 DIR_GIVEN=0
+SKIP_DB=0
+ENV_FILE_SRC=''
+ENV_FILE_KEEP=0
+EXTRA_DB_PASS=''
 IN_PROJECT_DIR=0
 DB_NAME='wzbp'
 DB_USER='wzbp'
@@ -325,6 +329,9 @@ wzbp · 王者荣耀 BP 展示台 —— Linux 一键安装脚本 v1.0.0
   --tarball <下载地址>   远程一键模式下用 tar.gz 包代替 git
   --service <方式>       常驻方式：auto（默认）/ bt / pm2 / systemd
   --ssl-email <邮箱>     申请 Let's Encrypt 证书用的邮箱（可选）
+  --skip-db              跳过建库建用户：你自己已经建好库和 .env 了，只部署站点
+                         （会先用 .env 连一次数据库，连不上会明确报错并给出建库命令）
+  --env-file <路径>       指定一份现成的 .env（会复制到站点目录并沿用其中的密码）
   --no-nginx             只装 Node 服务与数据库，不动 Nginx
   --no-ssl               不申请 HTTPS（默认会尝试，失败不阻断）
   --uninstall            卸载：停服务 + 删 Nginx 配置（不会删数据库）
@@ -384,8 +391,10 @@ parse_args() {
       --db-root-pass)   shift; [ $# -gt 0 ] || usage_err '--db-root-pass 后面要跟密码'; DB_ROOT_PASS="$1"; DB_ROOT_PASS_GIVEN=1 ;;
       --repo)           shift; [ $# -gt 0 ] || usage_err '--repo 后面要跟 git 地址'; REPO_URL="$1" ;;
       --tarball)        shift; [ $# -gt 0 ] || usage_err '--tarball 后面要跟下载地址'; TARBALL_URL="$1" ;;
+      --env-file)       shift; [ $# -gt 0 ] || usage_err '--env-file 后面要跟 .env 文件路径'; ENV_FILE_SRC="$1"; ENV_FILE_KEEP=1 ;;
       --service)        shift; [ $# -gt 0 ] || usage_err '--service 后面要跟 auto/bt/pm2/systemd'; SERVICE_PREF="$1" ;;
       --ssl-email)      shift; [ $# -gt 0 ] || usage_err '--ssl-email 后面要跟邮箱'; SSL_EMAIL="$1" ;;
+      --skip-db)        SKIP_DB=1 ;;
       --no-nginx)       NO_NGINX=1 ;;
       --no-ssl)         NO_SSL=1 ;;
       --uninstall)      UNINSTALL=1 ;;
@@ -996,8 +1005,71 @@ gen_password() {
 step_database() {
   step '建数据库与数据库用户（教程 §4；表由服务自己建，不导 schema.sql）'
 
+  # --env-file：用你现成的 .env 覆盖站点里的，后面所有连接信息都从它来读。
+  # 这就是「只给一个 env 文件」的用法：库你建好、密码你定好，脚本只负责部署。
+  if [ -n "$ENV_FILE_SRC" ]; then
+    if [ ! -f "$ENV_FILE_SRC" ]; then
+      die "--env-file 指向的文件不存在：${ENV_FILE_SRC}" "确认路径；可以用项目里的 .env.example 复制一份改改。"
+    fi
+    mkp "$DIR"
+    if ! cp "$ENV_FILE_SRC" "${DIR}/${ENV_NAME}" 2>/dev/null; then
+      die "复制 .env 失败：${ENV_FILE_SRC} → ${DIR}/${ENV_NAME}" '检查权限与磁盘空间。'
+    fi
+    chmod 600 "${DIR}/${ENV_NAME}" 2>/dev/null || true
+    ok "已使用 --env-file 指定的 .env：${ENV_FILE_SRC}"
+    SKIP_DB=1
+  fi
+
+  # 0) 已经有一份 .env？那就复用它，别再生成新密码。
+  #    这一条很关键：否则用户在 .env 里手填的密码会被这里的新随机密码覆盖，
+  #    数据库那边还是老密码 → 服务连不上，而且原因很难看出来。
+  if [ "$DB_PASS_GIVEN" = 0 ] && [ -f "${DIR}/${ENV_NAME}" ]; then
+    local reused
+    reused=$(sed -n 's/^[[:space:]]*WZBP_DB_PASSWORD[[:space:]]*=[[:space:]]*["'"'"']\?\([^"'"'"']*\)["'"'"']\?[[:space:]]*$/\1/p' \
+      "${DIR}/${ENV_NAME}" 2>/dev/null | head -n 1)
+    if [ -n "$reused" ]; then
+      DB_PASS="$reused"
+      DB_PASS_GIVEN=1
+      ENV_FILE_KEEP=1
+      ok "复用已有 ${ENV_NAME} 里的数据库密码（不会覆盖你填的）"
+      # 顺带把它里面显式写了的连接参数也认下来，免得两边不一致
+      local v
+      v=$(sed -n 's/^[[:space:]]*WZBP_DB_NAME[[:space:]]*=[[:space:]]*["'"'"']\?\([^"'"'"']*\)["'"'"']\?[[:space:]]*$/\1/p' "${DIR}/${ENV_NAME}" | head -n 1)
+      [ -n "$v" ] && DB_NAME="$v"
+      v=$(sed -n 's/^[[:space:]]*WZBP_DB_USER[[:space:]]*=[[:space:]]*["'"'"']\?\([^"'"'"']*\)["'"'"']\?[[:space:]]*$/\1/p' "${DIR}/${ENV_NAME}" | head -n 1)
+      [ -n "$v" ] && DB_USER="$v"
+      v=$(sed -n 's/^[[:space:]]*WZBP_DB_HOST[[:space:]]*=[[:space:]]*["'"'"']\?\([^"'"'"']*\)["'"'"']\?[[:space:]]*$/\1/p' "${DIR}/${ENV_NAME}" | head -n 1)
+      [ -n "$v" ] && DB_HOST="$v"
+      v=$(sed -n 's/^[[:space:]]*WZBP_DB_PORT[[:space:]]*=[[:space:]]*["'"'"']\?\([^"'"'"']*\)["'"'"']\?[[:space:]]*$/\1/p' "${DIR}/${ENV_NAME}" | head -n 1)
+      [ -n "$v" ] && DB_PORT="$v"
+      v=$(sed -n 's/^[[:space:]]*WZBP_PORT[[:space:]]*=[[:space:]]*["'"'"']\?\([^"'"'"']*\)["'"'"']\?[[:space:]]*$/\1/p' "${DIR}/${ENV_NAME}" | head -n 1)
+      [ -n "$v" ] && PORT="$v"
+    fi
+  fi
+
+  if [ "$SKIP_DB" = 1 ]; then
+    ok '--skip-db：跳过建库建用户，直接用你 .env 里的连接信息'
+    if dry; then
+      dim '  dry-run：正式安装时会用 .env 连接一次数据库，连不上会明确报错'
+    elif ! mysql_can_connect app; then
+      die "用 .env 里的连接信息连不上数据库（用户 ${DB_USER}@${DB_HOST}:${DB_PORT}/${DB_NAME}）" \
+"请先确认下面这条命令能通，再重跑：
+        mysql -h ${DB_HOST} -P ${DB_PORT} -u ${DB_USER} -p -e 'USE ${DB_NAME}; SELECT 1;'
+      常见原因：① 密码不对（.env 里 WZBP_DB_PASSWORD）；② 库没建；
+      ③ 宝塔 → 数据库 → 该用户权限没选「本地服务器」。
+      建库建用户一条命令（密码自己定，要和 .env 一致）：
+        mysql -uroot -p -e \"CREATE DATABASE IF NOT EXISTS ${DB_NAME} DEFAULT CHARACTER SET utf8mb4;\"
+        mysql -uroot -p -e \"CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '你的密码';\"
+        mysql -uroot -p -e \"GRANT ALL ON ${DB_NAME}.* TO '${DB_USER}'@'localhost'; FLUSH PRIVILEGES;\""
+    else
+      ok '用 .env 的连接信息成功连上数据库'
+    fi
+    DB_ROOT_PASS=''
+    return 0
+  fi
+
   if [ "$DB_PASS_GIVEN" = 1 ] && [ -n "$DB_PASS" ]; then
-    ok '使用 --db-pass 提供的密码'
+    ok '使用已提供的数据库密码'
   else
     if dry; then
       DB_PASS='__WZBP_GENERATED__'
@@ -1029,7 +1101,7 @@ step_database() {
       # 不少宝塔/镜像环境 root 本地是免密（socket 或空密码）
       DB_ROOT_PASS=''
       ok 'MySQL root 本地免密，直接用（无需输入密码）'
-    elif [ ! -t 0 ] || [ -n "$WZBP_NO_PROMPT" ]; then
+    elif [ ! -t 0 ] || [ -n "${WZBP_NO_PROMPT:-}" ] || [ "$SKIP_DB" = 1 ] || [ -n "$EXTRA_DB_PASS" ]; then
       die '不知道 MySQL 管理员密码' \
 "两种办法任选：
       ① 加参数重跑（推荐）：bash install.sh --domain ${DOMAIN} --db-root-pass '你的root密码'
@@ -1186,10 +1258,18 @@ EOF
 step_env_file() {
   step '写入 .env 环境变量（教程 §5 / §6）'
 
-  render_env | write_file "${DIR}/${ENV_NAME}" '.env：WZBP_PORT / WZBP_DB_* 六个变量（含数据库密码，chmod 600）'
-  chmod_ 600 "${DIR}/${ENV_NAME}"
+  # 用户自己给的 .env（--env-file，或站点目录里本来就有一份）**不覆盖**。
+  # 否则他在里面写的 WZBP_PORT / WZBP_DB_POOL 之类的自定义值会被这里重写掉，
+  # 而且从现象上根本看不出是被脚本改的。
+  if [ "$ENV_FILE_KEEP" = 1 ] && [ -f "${DIR}/${ENV_NAME}" ]; then
+    chmod_ 600 "${DIR}/${ENV_NAME}"
+    ok "沿用你提供的 ${ENV_NAME}（未做任何改写）"
+  else
+    render_env | write_file "${DIR}/${ENV_NAME}" '.env：WZBP_PORT / WZBP_DB_* 等变量（含数据库密码，chmod 600）'
+    chmod_ 600 "${DIR}/${ENV_NAME}"
+    ok '密码只落在 .env，不写进任何会被 git 跟踪的文件'
+  fi
   chown_tree "${DIR}/${ENV_NAME}"
-  ok '密码只落在 .env，不写进任何会被 git 跟踪的文件'
 
   # 确保 .env 被 .gitignore 忽略（幂等：已有规则就不动）
   local gi="${DIR}/.gitignore"
